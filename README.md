@@ -17,7 +17,15 @@ A native macOS application for managing SMB network share connections. Easily mo
 
 ## Screenshots
 
-<!-- Add screenshots here -->
+### Main Window
+![Main Window](screenshots/main-window.png)
+
+The main window displays all configured SMB connections in a clean list. Each row shows the connection name, server path, and a color-coded status indicator (green = connected). The toolbar provides quick actions: **Connect All** (bolt icon), **Disconnect All** (bolt slash icon), and **Add Connection** (+). Each connection has a dedicated **Disconnect/Connect** button for individual control.
+
+### Add / Edit Connection
+![Add Connection](screenshots/add-connection.png)
+
+The connection form allows you to configure all the details for an SMB share: a friendly display name, the server address (IP or hostname), the share name, and authentication credentials. The **Auto-connect** toggle enables automatic reconnection every 30 seconds when the share drops. Passwords are securely stored in the macOS Keychain and never written to disk.
 
 ## Requirements
 
