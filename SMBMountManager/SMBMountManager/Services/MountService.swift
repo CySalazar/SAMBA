@@ -4,6 +4,7 @@ import Foundation
 @MainActor
 final class MountService: ObservableObject {
     @Published var statuses: [UUID: ConnectionStatus] = [:]
+    @Published private(set) var runtimeDetails: [UUID: SMBConnectionRuntimeDetails] = [:]
     @Published var maximumAutomaticRetryCount: Int {
         didSet {
             UserDefaults.standard.set(maximumAutomaticRetryCount, forKey: Self.maximumAutomaticRetryCountDefaultsKey)
@@ -17,6 +18,7 @@ final class MountService: ObservableObject {
     private var activeMountRequest: MountRequest?
     private var automaticRetryCounts: [UUID: Int] = [:]
     private var consecutiveMissedChecks: [UUID: Int] = [:]
+    private var telemetry: [UUID: ConnectionTelemetry] = [:]
     private let fileManager = FileManager.default
     private static let maximumAutomaticRetryCountDefaultsKey = "maximumAutomaticRetryCount"
 
@@ -64,6 +66,12 @@ final class MountService: ObservableObject {
         consecutiveMissedChecks = consecutiveMissedChecks.filter { connectionID, _ in
             connections.contains(where: { $0.id == connectionID })
         }
+        telemetry = telemetry.filter { connectionID, _ in
+            connections.contains(where: { $0.id == connectionID })
+        }
+        runtimeDetails = runtimeDetails.filter { connectionID, _ in
+            connections.contains(where: { $0.id == connectionID })
+        }
         if let activeMountRequest,
            !connections.contains(where: { $0.id == activeMountRequest.connectionID }) {
             self.activeMountRequest = nil
@@ -80,11 +88,17 @@ final class MountService: ObservableObject {
             setStatus(.connected, for: connection.id)
             LoggingService.shared.record(.debug, category: .mount, message: "Mount skipped for \(connection.serverAddress)/\(connection.shareName): already connected")
             automaticRetryCounts[connection.id] = 0
+            updateTelemetry(for: connection.id) { telemetry in
+                telemetry.automaticRetryCount = 0
+            }
             return
         }
 
         if initiatedByUser {
             automaticRetryCounts[connection.id] = 0
+            updateTelemetry(for: connection.id) { telemetry in
+                telemetry.automaticRetryCount = 0
+            }
         } else if automaticRetryCounts[connection.id, default: 0] >= maximumAutomaticRetryCount {
             setStatus(.error("Automatic retry limit reached"), for: connection.id)
             LoggingService.shared.record(
@@ -132,6 +146,7 @@ final class MountService: ObservableObject {
         }
 
         setStatus(.connecting, for: connection.id)
+        telemetry(for: connection.id).lastMountStartedAt = Date()
         LoggingService.shared.record(.info, category: .mount, message: "Starting silent mount for \(connection.serverAddress)/\(connection.shareName) | mountPoint=\(connection.mountPoint) initiatedByUser=\(initiatedByUser)")
 
         let mountPointURL = URL(fileURLWithPath: connection.mountPoint, isDirectory: true)
@@ -230,6 +245,9 @@ final class MountService: ObservableObject {
             setStatus(.connected, for: connection.id)
             LoggingService.shared.record(.info, category: .mount, message: "Connection marked connected for \(connection.serverAddress)/\(connection.shareName)")
             automaticRetryCounts[connection.id] = 0
+            updateTelemetry(for: connection.id) { telemetry in
+                telemetry.automaticRetryCount = 0
+            }
         } else if statuses[connection.id] == .connecting {
             setStatus(.error("Mount did not appear"), for: connection.id)
             LoggingService.shared.record(.error, category: .mount, message: "Mount timed out for \(connection.serverAddress)/\(connection.shareName)")
@@ -255,6 +273,11 @@ final class MountService: ObservableObject {
                 setStatus(.connected, for: connection.id)
                 automaticRetryCounts[connection.id] = 0
                 consecutiveMissedChecks[connection.id] = 0
+                updateTelemetry(for: connection.id) { telemetry in
+                    telemetry.automaticRetryCount = 0
+                }
+                refreshSessionDetailsIfNeeded(for: connection)
+                runPassiveProbeIfNeeded(for: connection)
                 continue
             }
 
@@ -299,6 +322,8 @@ final class MountService: ObservableObject {
                 setStatus(.connected, for: connection.id)
                 LoggingService.shared.record(.debug, category: .mount, message: "Detected mounted SMB volume for \(connection.serverAddress)/\(connection.shareName) during wait loop | attempt=\(attempt)")
                 finishMountAttempt(for: connection.id)
+                refreshSessionDetailsIfNeeded(for: connection, force: true)
+                runPassiveProbeIfNeeded(for: connection, force: true)
                 return
             }
 
@@ -309,8 +334,13 @@ final class MountService: ObservableObject {
                     setStatus(.connected, for: connection.id)
                     automaticRetryCounts[connection.id] = 0
                     consecutiveMissedChecks[connection.id] = 0
+                    updateTelemetry(for: connection.id) { telemetry in
+                        telemetry.automaticRetryCount = 0
+                    }
                     LoggingService.shared.record(.info, category: .mount, message: "Mount command completed successfully for \(connection.serverAddress)/\(connection.shareName) | exitCode=0")
                     finishMountAttempt(for: connection.id)
+                    refreshSessionDetailsIfNeeded(for: connection, force: true)
+                    runPassiveProbeIfNeeded(for: connection, force: true)
                     schedulePostMountVerification(for: connection)
                     return
                 }
@@ -343,6 +373,8 @@ final class MountService: ObservableObject {
             if self.isMounted(connection) {
                 self.setStatus(.connected, for: connection.id)
                 LoggingService.shared.record(.info, category: .mount, message: "Post-mount verification confirmed \(connection.serverAddress)/\(connection.shareName)")
+                self.refreshSessionDetailsIfNeeded(for: connection, force: true)
+                self.runPassiveProbeIfNeeded(for: connection, force: true)
             } else {
                 self.setStatus(.disconnected, for: connection.id)
                 LoggingService.shared.record(.warning, category: .mount, message: "Post-mount verification could not confirm \(connection.serverAddress)/\(connection.shareName) | expectedMountPoint=\(connection.mountPoint)")
@@ -402,6 +434,205 @@ final class MountService: ObservableObject {
         }
 
         return "Mount failed (exit code \(exitCode))."
+    }
+
+    func runBenchmark(for connection: SMBConnection) async {
+        guard let mountedVolumeURL = mountedVolumeURL(for: connection) else {
+            updateTelemetry(for: connection.id) { telemetry in
+                telemetry.benchmarkStatusMessage = "Benchmark unavailable because the share is not mounted."
+            }
+            return
+        }
+
+        updateTelemetry(for: connection.id) { telemetry in
+            telemetry.isBenchmarkRunning = true
+            telemetry.benchmarkStatusMessage = "Running a small manual benchmark."
+        }
+
+        let payloadSizeBytes = 4 * 1_048_576
+        let benchmarkFileURL = mountedVolumeURL.appendingPathComponent(".smbmountmanager-benchmark.tmp")
+        let payload = Data(repeating: 0x5A, count: payloadSizeBytes)
+
+        do {
+            let writeDuration = try Self.measure {
+                try payload.write(to: benchmarkFileURL, options: .atomic)
+            }
+            let readDuration = try Self.measure {
+                _ = try Data(contentsOf: benchmarkFileURL)
+            }
+            try? fileManager.removeItem(at: benchmarkFileURL)
+
+            let result = SMBBenchmarkResult(
+                timestamp: Date(),
+                payloadSizeBytes: payloadSizeBytes,
+                writeDuration: writeDuration,
+                readDuration: readDuration
+            )
+
+            updateTelemetry(for: connection.id) { telemetry in
+                telemetry.isBenchmarkRunning = false
+                telemetry.benchmarkResult = result
+                telemetry.benchmarkStatusMessage = "Manual benchmark completed successfully."
+            }
+        } catch {
+            try? fileManager.removeItem(at: benchmarkFileURL)
+            updateTelemetry(for: connection.id) { telemetry in
+                telemetry.isBenchmarkRunning = false
+                telemetry.benchmarkStatusMessage = "Benchmark failed: \(error.localizedDescription)"
+            }
+            LoggingService.shared.record(.warning, category: .mount, message: "Benchmark failed for \(connection.serverAddress)/\(connection.shareName): \(error.localizedDescription)")
+        }
+    }
+
+    private func runPassiveProbeIfNeeded(for connection: SMBConnection, force: Bool = false) {
+        guard let mountedVolumeURL = mountedVolumeURL(for: connection) else {
+            return
+        }
+
+        let telemetry = telemetry(for: connection.id)
+        if force == false {
+            if telemetry.isProbing {
+                return
+            }
+
+            if let lastProbeAt = telemetry.lastProbeAt,
+               Date().timeIntervalSince(lastProbeAt) < 20 {
+                return
+            }
+        }
+
+        telemetry.isProbing = true
+        telemetry.lastProbeAt = Date()
+        self.telemetry[connection.id] = telemetry
+
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                let latency = try Self.measure {
+                    _ = try FileManager.default.contentsOfDirectory(
+                        at: mountedVolumeURL,
+                        includingPropertiesForKeys: [.isDirectoryKey],
+                        options: [.skipsPackageDescendants, .skipsHiddenFiles]
+                    )
+                }
+
+                await MainActor.run {
+                    self.updateTelemetry(for: connection.id) { telemetry in
+                        telemetry.recordProbeLatency(latency)
+                        telemetry.isProbing = false
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.updateTelemetry(for: connection.id) { telemetry in
+                        telemetry.isProbing = false
+                    }
+                }
+                LoggingService.shared.record(.debug, category: .mount, message: "Passive probe failed for \(connection.serverAddress)/\(connection.shareName): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func refreshSessionDetailsIfNeeded(for connection: SMBConnection, force: Bool = false) {
+        guard let mountedVolumeURL = mountedVolumeURL(for: connection) else {
+            return
+        }
+
+        let telemetry = telemetry(for: connection.id)
+        if force == false {
+            if telemetry.isRefreshingSessionDetails {
+                return
+            }
+
+            if let lastSessionRefreshAt = telemetry.lastSessionRefreshAt,
+               Date().timeIntervalSince(lastSessionRefreshAt) < 60 {
+                return
+            }
+        }
+
+        telemetry.isRefreshingSessionDetails = true
+        telemetry.lastSessionRefreshAt = Date()
+        self.telemetry[connection.id] = telemetry
+
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            let sessionAttributes = Self.loadSessionAttributes(forMountPath: mountedVolumeURL.path)
+            let multichannelAttributes = Self.loadMultichannelAttributes(forMountPath: mountedVolumeURL.path)
+
+            await MainActor.run {
+                self.updateTelemetry(for: connection.id) { telemetry in
+                    telemetry.isRefreshingSessionDetails = false
+                    telemetry.applySessionAttributes(sessionAttributes)
+                    telemetry.applyMultichannelAttributes(multichannelAttributes)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func loadSessionAttributes(forMountPath mountPath: String) -> [String: String] {
+        loadSMBUtilAttributes(arguments: ["statshares", "-m", mountPath, "-f", "Json"])
+    }
+
+    nonisolated private static func loadMultichannelAttributes(forMountPath mountPath: String) -> [String: String] {
+        loadSMBUtilAttributes(arguments: ["multichannel", "-m", mountPath, "-f", "Json"])
+    }
+
+    nonisolated private static func loadSMBUtilAttributes(arguments: [String]) -> [String: String] {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/smbutil")
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            guard process.terminationStatus == 0 else {
+                return [:]
+            }
+
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let jsonObject = try JSONSerialization.jsonObject(with: data)
+
+            return flattenJSONObject(jsonObject)
+        } catch {
+            return [:]
+        }
+    }
+
+    nonisolated private static func flattenJSONObject(_ object: Any, prefix: String = "") -> [String: String] {
+        if let dictionary = object as? [String: Any] {
+            return dictionary.reduce(into: [:]) { partialResult, entry in
+                let nestedPrefix = prefix.isEmpty ? entry.key : "\(prefix)_\(entry.key)"
+                partialResult.merge(flattenJSONObject(entry.value, prefix: nestedPrefix)) { _, new in new }
+            }
+        }
+
+        if let array = object as? [Any] {
+            if let first = array.first {
+                return flattenJSONObject(first, prefix: prefix)
+            }
+            return [:]
+        }
+
+        guard prefix.isEmpty == false else {
+            return [:]
+        }
+
+        return [prefix: String(describing: object)]
+    }
+
+    nonisolated private static func measure(_ block: () throws -> Void) throws -> TimeInterval {
+        let start = CFAbsoluteTimeGetCurrent()
+        try block()
+        return CFAbsoluteTimeGetCurrent() - start
     }
 
     private func mountedVolumeURL(for connection: SMBConnection) -> URL? {
@@ -477,6 +708,9 @@ final class MountService: ObservableObject {
             if isMounted(connection) {
                 setStatus(.connected, for: connection.id)
                 automaticRetryCounts[connection.id] = 0
+                updateTelemetry(for: connection.id) { telemetry in
+                    telemetry.automaticRetryCount = 0
+                }
                 LoggingService.shared.record(.info, category: .mount, message: "Queued mount resolved immediately because share is already mounted for \(connection.serverAddress)/\(connection.shareName)")
                 continue
             }
@@ -502,11 +736,17 @@ final class MountService: ObservableObject {
     private func registerFailure(for connectionID: UUID, initiatedByUser: Bool) {
         guard initiatedByUser == false else {
             automaticRetryCounts[connectionID] = 1
+            updateTelemetry(for: connectionID) { telemetry in
+                telemetry.automaticRetryCount = 1
+            }
             return
         }
 
         let newCount = automaticRetryCounts[connectionID, default: 0] + 1
         automaticRetryCounts[connectionID] = newCount
+        updateTelemetry(for: connectionID) { telemetry in
+            telemetry.automaticRetryCount = newCount
+        }
 
         if let connection = connections.first(where: { $0.id == connectionID }) {
             if newCount >= maximumAutomaticRetryCount {
@@ -538,9 +778,33 @@ final class MountService: ObservableObject {
         if oldStatus != newStatus {
             let name = connections.first(where: { $0.id == connectionID })?.shareName ?? connectionID.uuidString
             LoggingService.shared.record(.debug, category: .mount, message: "[\(caller)] Status change for \(name): \(oldStatus?.label ?? "nil") → \(newStatus.label)")
+            updateTelemetryStatus(for: connectionID, oldStatus: oldStatus, newStatus: newStatus)
             var updatedStatuses = statuses
             updatedStatuses[connectionID] = newStatus
             statuses = updatedStatuses
+        }
+    }
+
+    private func telemetry(for connectionID: UUID) -> ConnectionTelemetry {
+        if let existing = telemetry[connectionID] {
+            return existing
+        }
+
+        let telemetry = ConnectionTelemetry()
+        self.telemetry[connectionID] = telemetry
+        return telemetry
+    }
+
+    private func updateTelemetry(for connectionID: UUID, mutate: (ConnectionTelemetry) -> Void) {
+        let telemetry = telemetry(for: connectionID)
+        mutate(telemetry)
+        runtimeDetails[connectionID] = telemetry.snapshot()
+    }
+
+    private func updateTelemetryStatus(for connectionID: UUID, oldStatus: ConnectionStatus?, newStatus: ConnectionStatus) {
+        updateTelemetry(for: connectionID) { telemetry in
+            telemetry.recordStatusTransition(from: oldStatus, to: newStatus)
+            telemetry.automaticRetryCount = automaticRetryCounts[connectionID, default: telemetry.automaticRetryCount]
         }
     }
 }
@@ -548,6 +812,184 @@ final class MountService: ObservableObject {
 private struct MountRequest {
     let connectionID: UUID
     let initiatedByUser: Bool
+}
+
+private final class ConnectionTelemetry {
+    private(set) var statusChangedAt = Date()
+    private(set) var probeLatencies: [TimeInterval] = []
+
+    var lastMountStartedAt: Date?
+    var lastMountDuration: TimeInterval?
+    var successfulMounts = 0
+    var failedMounts = 0
+    var disconnectCount = 0
+    var automaticRetryCount = 0
+    var totalConnectedDuration: TimeInterval = 0
+    var totalDisconnectedDuration: TimeInterval = 0
+    var protocolVersion: String?
+    var signingState: String?
+    var encryptionState: String?
+    var multichannelState: String?
+    var sessionAttributes: [String: String] = [:]
+    var benchmarkResult: SMBBenchmarkResult?
+    var benchmarkStatusMessage: String?
+    var isBenchmarkRunning = false
+    var isProbing = false
+    var lastProbeAt: Date?
+    var isRefreshingSessionDetails = false
+    var lastSessionRefreshAt: Date?
+
+    func recordStatusTransition(from oldStatus: ConnectionStatus?, to newStatus: ConnectionStatus) {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(statusChangedAt)
+
+        if oldStatus == .connected {
+            totalConnectedDuration += elapsed
+        } else {
+            totalDisconnectedDuration += elapsed
+        }
+
+        if oldStatus == .connecting, newStatus == .connected {
+            successfulMounts += 1
+            if let lastMountStartedAt {
+                lastMountDuration = now.timeIntervalSince(lastMountStartedAt)
+            }
+        }
+
+        if oldStatus == .connecting, case .error = newStatus {
+            failedMounts += 1
+        }
+
+        if oldStatus == .connected, newStatus != .connected {
+            disconnectCount += 1
+        }
+
+        statusChangedAt = now
+    }
+
+    func recordProbeLatency(_ latency: TimeInterval) {
+        probeLatencies.append(latency)
+        if probeLatencies.count > 12 {
+            probeLatencies.removeFirst(probeLatencies.count - 12)
+        }
+    }
+
+    func applySessionAttributes(_ attributes: [String: String]) {
+        guard attributes.isEmpty == false else {
+            return
+        }
+
+        sessionAttributes = attributes
+        protocolVersion = bestMatch(in: attributes, candidates: ["smb_version", "version"])
+        signingState = bestMatch(in: attributes, candidates: ["signing_required", "signing_on", "signing"])
+        encryptionState = bestMatch(in: attributes, candidates: ["encryption", "encrypt"])
+    }
+
+    func applyMultichannelAttributes(_ attributes: [String: String]) {
+        guard attributes.isEmpty == false else {
+            return
+        }
+
+        multichannelState = bestMatch(in: attributes, candidates: ["multichannel", "channel"])
+        for (key, value) in attributes where sessionAttributes[key] == nil {
+            sessionAttributes[key] = value
+        }
+    }
+
+    func snapshot() -> SMBConnectionRuntimeDetails {
+        let lastProbeLatency = probeLatencies.last
+        let averageProbeLatency = probeLatencies.isEmpty ? nil : probeLatencies.reduce(0, +) / Double(probeLatencies.count)
+        let probeLatencyJitter: TimeInterval?
+        if probeLatencies.count < 2 {
+            probeLatencyJitter = nil
+        } else {
+            let diffs = zip(probeLatencies.dropFirst(), probeLatencies).map { abs($0 - $1) }
+            probeLatencyJitter = diffs.reduce(0, +) / Double(diffs.count)
+        }
+        let attemptCount = successfulMounts + failedMounts
+
+        return SMBConnectionRuntimeDetails(
+            lastMountDuration: lastMountDuration,
+            lastProbeLatency: lastProbeLatency,
+            averageProbeLatency: averageProbeLatency,
+            probeLatencyJitter: probeLatencyJitter,
+            successfulMounts: successfulMounts,
+            failedMounts: failedMounts,
+            disconnectCount: disconnectCount,
+            automaticRetryCount: automaticRetryCount,
+            totalConnectedDuration: totalConnectedDuration,
+            totalDisconnectedDuration: totalDisconnectedDuration,
+            protocolVersion: protocolVersion,
+            signingState: signingState,
+            encryptionState: encryptionState,
+            multichannelState: multichannelState,
+            sessionAttributes: sessionAttributes,
+            benchmarkResult: benchmarkResult,
+            benchmarkStatusMessage: benchmarkStatusMessage,
+            isBenchmarkRunning: isBenchmarkRunning,
+            stabilityGrade: stabilityGrade(attemptCount: attemptCount, lastProbeLatency: lastProbeLatency, probeLatencyJitter: probeLatencyJitter),
+            confidenceLevel: confidenceLevel(attemptCount: attemptCount)
+        )
+    }
+
+    private func stabilityGrade(
+        attemptCount: Int,
+        lastProbeLatency: TimeInterval?,
+        probeLatencyJitter: TimeInterval?
+    ) -> ConnectionStabilityGrade {
+        guard attemptCount + disconnectCount >= 2 else {
+            return .insufficientHistory
+        }
+
+        var score = 100.0
+        let failureRate = attemptCount == 0 ? 0 : Double(failedMounts) / Double(attemptCount)
+        score -= failureRate * 45
+        score -= Double(disconnectCount) * 10
+
+        if let lastProbeLatency {
+            score -= min(lastProbeLatency * 15, 20)
+        }
+
+        if let probeLatencyJitter {
+            score -= min(probeLatencyJitter * 30, 20)
+        }
+
+        switch score {
+        case 80...:
+            return .high
+        case 55..<80:
+            return .medium
+        default:
+            return .low
+        }
+    }
+
+    private func confidenceLevel(attemptCount: Int) -> ConnectionConfidenceLevel {
+        switch attemptCount + probeLatencies.count {
+        case 8...:
+            return .high
+        case 4...:
+            return .medium
+        default:
+            return .low
+        }
+    }
+
+    private func bestMatch(in attributes: [String: String], candidates: [String]) -> String? {
+        for candidate in candidates {
+            if let match = attributes.first(where: { normalize($0.key).contains(candidate) }) {
+                return match.value
+            }
+        }
+
+        return nil
+    }
+
+    private func normalize(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
 }
 
 private extension SMBConnection {

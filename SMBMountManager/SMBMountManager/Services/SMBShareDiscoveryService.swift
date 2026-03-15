@@ -19,7 +19,7 @@ struct SMBShareDiscoveryService {
         serverAddress: String,
         username: String,
         password: String
-    ) async throws -> [String] {
+    ) async throws -> [DiscoveredSMBShare] {
         let trimmedServer = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -51,7 +51,7 @@ struct SMBShareDiscoveryService {
                 let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
 
                 if process.terminationStatus == 0 {
-                    let shares = parseShares(from: output)
+                    let shares = parseShares(from: output, serverAddress: trimmedServer)
                     LoggingService.shared.record(.info, category: .discovery, message: "Share discovery for \(trimmedServer) returned \(shares.count) entries")
                     continuation.resume(returning: shares)
                 } else {
@@ -72,8 +72,9 @@ struct SMBShareDiscoveryService {
         }
     }
 
-    private static func parseShares(from output: String) -> [String] {
+    private static func parseShares(from output: String, serverAddress: String) -> [DiscoveredSMBShare] {
         let ignoredPrefixes = ["Share", "-", "Server", "Comment"]
+        let separatorPattern = try? NSRegularExpression(pattern: "\\s{2,}")
 
         let shares = output
             .split(whereSeparator: \.isNewline)
@@ -81,12 +82,63 @@ struct SMBShareDiscoveryService {
             .filter { line in
                 !line.isEmpty && !ignoredPrefixes.contains { line.hasPrefix($0) }
             }
-            .compactMap { line in
-                line.split(whereSeparator: \.isWhitespace).first.map(String.init)
+            .compactMap { line -> DiscoveredSMBShare? in
+                let parts = splitColumns(in: line, using: separatorPattern)
+                guard let name = parts.first, name.isEmpty == false else {
+                    return nil
+                }
+
+                let type = parts.count > 1 ? parts[1] : "Unknown"
+                let comment = parts.count > 2 ? parts[2] : ""
+
+                return DiscoveredSMBShare(
+                    name: name,
+                    type: type,
+                    comment: comment,
+                    serverAddress: serverAddress
+                )
             }
 
-        return Array(Set(shares)).sorted {
-            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        return Array(Dictionary(uniqueKeysWithValues: shares.map { ($0.id, $0) }).values).sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+    }
+
+    private static func splitColumns(in line: String, using regex: NSRegularExpression?) -> [String] {
+        guard let regex else {
+            return [line]
+        }
+
+        let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+        let matches = regex.matches(in: line, range: nsRange)
+        guard matches.isEmpty == false else {
+            return [line]
+        }
+
+        var parts: [String] = []
+        var currentIndex = line.startIndex
+
+        for match in matches {
+            guard let range = Range(match.range, in: line) else {
+                continue
+            }
+
+            let column = line[currentIndex..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            if column.isEmpty == false {
+                parts.append(column)
+            }
+            currentIndex = range.upperBound
+        }
+
+        let trailing = line[currentIndex...].trimmingCharacters(in: .whitespacesAndNewlines)
+        if trailing.isEmpty == false {
+            parts.append(trailing)
+        }
+
+        if parts.count > 3 {
+            return [parts[0], parts[1], parts.dropFirst(2).joined(separator: " ")]
+        }
+
+        return parts
     }
 }

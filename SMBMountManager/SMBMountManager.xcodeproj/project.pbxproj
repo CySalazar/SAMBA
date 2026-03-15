@@ -21,6 +21,7 @@
 		AA00000C /* SMBShareDiscoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000E; };
 		AA00000D /* DiagnosticsConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000F; };
 		AA00000E /* DiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000010; };
+		AA00000F /* SMBShareDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000011; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +41,7 @@
 		AB00000E /* SMBShareDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMBShareDiscoveryService.swift; sourceTree = "<group>"; };
 		AB00000F /* DiagnosticsConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsConsoleView.swift; sourceTree = "<group>"; };
 		AB000010 /* DiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryView.swift; sourceTree = "<group>"; };
+		AB000011 /* SMBShareDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMBShareDetails.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,6 +80,7 @@
 			isa = PBXGroup;
 			children = (
 				AB000002 /* SMBConnection.swift */,
+				AB000011 /* SMBShareDetails.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -222,6 +225,7 @@
 				AA00000C /* SMBShareDiscoveryService.swift in Sources */,
 				AA00000D /* DiagnosticsConsoleView.swift in Sources */,
 				AA00000E /* DiscoveryView.swift in Sources */,
+				AA00000F /* SMBShareDetails.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

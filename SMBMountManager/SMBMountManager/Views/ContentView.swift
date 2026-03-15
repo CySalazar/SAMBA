@@ -88,7 +88,7 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $isAddingNew) {
-                ConnectionEditView(existing: nil, suggestedHost: suggestedHost) { connection, password in
+                ConnectionEditView(existing: nil, suggestedHost: suggestedHost, mountService: mountService) { connection, password in
                     KeychainService.savePassword(password, for: connection)
                     connections.append(connection)
                     saveAndRefresh()
@@ -106,7 +106,7 @@ struct ContentView: View {
                 DiagnosticsConsoleView(loggingService: loggingService, mountService: mountService)
             }
             .sheet(item: $editingConnection) { connection in
-                ConnectionEditView(existing: connection) { updated, password in
+                ConnectionEditView(existing: connection, mountService: mountService) { updated, password in
                     let otherConnections = connections.filter { $0.id != connection.id }
                     KeychainService.savePassword(password, for: updated)
                     if let idx = connections.firstIndex(where: { $0.id == updated.id }) {

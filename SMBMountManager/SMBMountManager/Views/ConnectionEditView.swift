@@ -5,6 +5,7 @@ struct ConnectionEditView: View {
 
     let existing: SMBConnection?
     let suggestedHost: DiscoveredSMBHost?
+    @ObservedObject var mountService: MountService
     let onSave: (SMBConnection, String) -> Void
 
     @State private var name: String = ""
@@ -13,8 +14,8 @@ struct ConnectionEditView: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var autoConnect: Bool = false
-    @State private var discoveredShares: [String] = []
-    @State private var selectedDiscoveredShare = ""
+    @State private var discoveredShares: [DiscoveredSMBShare] = []
+    @State private var selectedDiscoveredShareID = ""
     @State private var shareDiscoveryError: String?
     @State private var isDiscoveringShares = false
 
@@ -42,17 +43,23 @@ struct ConnectionEditView: View {
                     }
 
                     if !discoveredShares.isEmpty {
-                        Picker("Available shares", selection: $selectedDiscoveredShare) {
+                        Picker("Available shares", selection: $selectedDiscoveredShareID) {
                             Text("Select a share").tag("")
                             ForEach(discoveredShares, id: \.self) { share in
-                                Text(share).tag(share)
+                                Text(share.name).tag(share.id)
                             }
                         }
-                        .onChange(of: selectedDiscoveredShare) { newValue in
-                            guard !newValue.isEmpty else { return }
-                            shareName = newValue
+                        .onChange(of: selectedDiscoveredShareID) { newValue in
+                            guard
+                                newValue.isEmpty == false,
+                                let share = discoveredShares.first(where: { $0.id == newValue })
+                            else {
+                                return
+                            }
+
+                            shareName = share.name
                             if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                name = newValue
+                                name = share.name
                             }
                         }
                     }
@@ -65,6 +72,80 @@ struct ConnectionEditView: View {
                         Text("Use the current server and credentials to query the list of available shares.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let selectedShare {
+                    Section("Selected Share Details") {
+                        detailRow(title: "Share", value: selectedShare.name)
+                        detailRow(title: "Type", value: selectedShare.type)
+                        detailRow(title: "Comment", value: selectedShare.comment.isEmpty ? "Not available" : selectedShare.comment)
+                        detailRow(title: "Hidden/Admin", value: selectedShare.isHidden ? "Yes" : "No")
+                        detailRow(title: "URL", value: selectedShare.smbURL)
+                    }
+                }
+
+                if let existing {
+                    Section("Connection Observability") {
+                        detailRow(title: "Mount Status", value: currentStatus.label)
+                        detailRow(title: "Stability", value: runtimeDetails.stabilityGrade.title)
+                        detailRow(title: "Confidence", value: runtimeDetails.confidenceLevel.title)
+                        detailRow(title: "Mount Time", value: formatted(duration: runtimeDetails.lastMountDuration))
+                        detailRow(title: "Last Probe", value: formatted(duration: runtimeDetails.lastProbeLatency))
+                        detailRow(title: "Average Probe", value: formatted(duration: runtimeDetails.averageProbeLatency))
+                        detailRow(title: "Latency Jitter", value: formatted(duration: runtimeDetails.probeLatencyJitter))
+                        detailRow(title: "Successful Mounts", value: "\(runtimeDetails.successfulMounts)")
+                        detailRow(title: "Failed Mounts", value: "\(runtimeDetails.failedMounts)")
+                        detailRow(title: "Disconnects", value: "\(runtimeDetails.disconnectCount)")
+                        detailRow(title: "Retries", value: "\(runtimeDetails.automaticRetryCount)")
+                        detailRow(title: "Observed Uptime", value: formatted(duration: runtimeDetails.totalConnectedDuration))
+                        detailRow(title: "Observed Downtime", value: formatted(duration: runtimeDetails.totalDisconnectedDuration))
+                    }
+
+                    Section("SMB Session Details") {
+                        detailRow(title: "Protocol", value: runtimeDetails.protocolVersion ?? "Available when mounted")
+                        detailRow(title: "Signing", value: runtimeDetails.signingState ?? "Unknown")
+                        detailRow(title: "Encryption", value: runtimeDetails.encryptionState ?? "Unknown")
+                        detailRow(title: "Multichannel", value: runtimeDetails.multichannelState ?? "Unknown")
+
+                        ForEach(runtimeDetails.sessionAttributes.keys.sorted(), id: \.self) { key in
+                            if let value = runtimeDetails.sessionAttributes[key], value.isEmpty == false {
+                                detailRow(title: prettifiedAttributeName(key), value: value)
+                            }
+                        }
+                    }
+
+                    Section("Manual Benchmark") {
+                        HStack {
+                            Button(runtimeDetails.isBenchmarkRunning ? "Benchmark Running…" : "Run Benchmark") {
+                                Task {
+                                    await mountService.runBenchmark(for: existing)
+                                }
+                            }
+                            .disabled(runtimeDetails.isBenchmarkRunning || currentStatus != .connected)
+
+                            if runtimeDetails.isBenchmarkRunning {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
+
+                        if let benchmark = runtimeDetails.benchmarkResult {
+                            detailRow(title: "Last Run", value: benchmark.timestamp.formatted(date: .abbreviated, time: .shortened))
+                            detailRow(title: "Payload", value: ByteCountFormatter.string(fromByteCount: Int64(benchmark.payloadSizeBytes), countStyle: .file))
+                            detailRow(title: "Write Speed", value: formattedThroughput(benchmark.writeThroughputMBps))
+                            detailRow(title: "Read Speed", value: formattedThroughput(benchmark.readThroughputMBps))
+                        }
+
+                        if let benchmarkStatusMessage = runtimeDetails.benchmarkStatusMessage {
+                            Text(benchmarkStatusMessage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Runs a small read/write test only on explicit request and only while the share is mounted.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -131,8 +212,8 @@ struct ConnectionEditView: View {
                 await MainActor.run {
                     discoveredShares = shares
                     if shares.count == 1, let onlyShare = shares.first {
-                        selectedDiscoveredShare = onlyShare
-                        shareName = onlyShare
+                        selectedDiscoveredShareID = onlyShare.id
+                        shareName = onlyShare.name
                     }
                     isDiscoveringShares = false
                 }
@@ -149,10 +230,12 @@ struct ConnectionEditView: View {
     init(
         existing: SMBConnection?,
         suggestedHost: DiscoveredSMBHost? = nil,
+        mountService: MountService,
         onSave: @escaping (SMBConnection, String) -> Void
     ) {
         self.existing = existing
         self.suggestedHost = suggestedHost
+        self.mountService = mountService
         self.onSave = onSave
 
         if let conn = existing {
@@ -166,5 +249,62 @@ struct ConnectionEditView: View {
             _name = State(initialValue: suggestedHost.displayName)
             _serverAddress = State(initialValue: suggestedHost.normalizedHostName)
         }
+    }
+
+    private var selectedShare: DiscoveredSMBShare? {
+        discoveredShares.first(where: { $0.id == selectedDiscoveredShareID })
+    }
+
+    private var currentStatus: ConnectionStatus {
+        guard let existing else {
+            return .disconnected
+        }
+
+        return mountService.statuses[existing.id] ?? .disconnected
+    }
+
+    private var runtimeDetails: SMBConnectionRuntimeDetails {
+        guard let existing else {
+            return SMBConnectionRuntimeDetails()
+        }
+
+        return mountService.runtimeDetails[existing.id] ?? SMBConnectionRuntimeDetails()
+    }
+
+    @ViewBuilder
+    private func detailRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func formatted(duration: TimeInterval?) -> String {
+        guard let duration else {
+            return "Not available"
+        }
+
+        if duration < 1 {
+            return "\(Int((duration * 1000).rounded())) ms"
+        }
+
+        return String(format: "%.2f s", duration)
+    }
+
+    private func formattedThroughput(_ throughput: Double) -> String {
+        guard throughput > 0 else {
+            return "Not available"
+        }
+
+        return String(format: "%.2f MB/s", throughput)
+    }
+
+    private func prettifiedAttributeName(_ key: String) -> String {
+        key
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { $0.capitalized }
+            .joined(separator: " ")
     }
 }
