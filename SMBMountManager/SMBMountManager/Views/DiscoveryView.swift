@@ -3,6 +3,7 @@ import SwiftUI
 struct DiscoveryView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var discoveryService: SMBDiscoveryService
+    let configuredHosts: Set<String>
     let onSelectHost: (DiscoveredSMBHost) -> Void
 
     var body: some View {
@@ -21,10 +22,10 @@ struct DiscoveryView: View {
                 Button("Refresh") {
                     discoveryService.startBrowsing()
                 }
-                .help("Scan the local network again for SMB servers")
+                .help("Refresh the SMB host list without clearing previously resolved hosts")
             }
 
-            Text("Browse SMB hosts announced on the local network and use one as the starting point for a new connection.")
+            Text("Browse SMB hosts announced on the local network, inspect their resolved network details, and use one as the starting point for a new connection.")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -48,22 +49,40 @@ struct DiscoveryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(discoveryService.hosts) { host in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(host.displayName)
-                                .font(.headline)
-                            Text(host.normalizedHostName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 8) {
+                                    Text(host.displayName)
+                                        .font(.headline)
+                                    if configuredHosts.contains(host.normalizedHostName.lowercased()) {
+                                        Text("Configured")
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(.quaternary, in: Capsule())
+                                    }
+                                }
+                                Text(host.normalizedHostName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Button("Use") {
+                                onSelectHost(host)
+                                dismiss()
+                            }
+                            .help("Use this server to prefill a new SMB connection")
                         }
 
-                        Spacer()
-
-                        Button("Use") {
-                            onSelectHost(host)
-                            dismiss()
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                            gridRow("Network", host.secondaryDetails)
+                            gridRow("Last Seen", host.lastResolvedAt.formatted(date: .omitted, time: .standard))
+                            gridRow("Resolve Time", formatted(duration: host.resolveDuration))
                         }
-                        .help("Use this server to prefill a new SMB connection")
+                        .font(.caption)
                     }
                     .padding(.vertical, 4)
                 }
@@ -80,12 +99,32 @@ struct DiscoveryView: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 520, minHeight: 360)
+        .frame(minWidth: 620, minHeight: 420)
         .onAppear {
             discoveryService.startBrowsing()
         }
         .onDisappear {
             discoveryService.stopBrowsing()
         }
+    }
+
+    @ViewBuilder
+    private func gridRow(_ title: String, _ value: String) -> some View {
+        GridRow {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func formatted(duration: TimeInterval?) -> String {
+        guard let duration else {
+            return "Pending"
+        }
+        if duration < 1 {
+            return "\(Int((duration * 1000).rounded())) ms"
+        }
+        return String(format: "%.2f s", duration)
     }
 }

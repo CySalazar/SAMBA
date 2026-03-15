@@ -1,12 +1,21 @@
 import AppKit
 import SwiftUI
 
+private enum DiagnosticsTab: String, CaseIterable, Identifiable {
+    case logs
+    case health
+
+    var id: String { rawValue }
+}
+
 struct DiagnosticsConsoleView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var loggingService: LoggingService
     @ObservedObject var mountService: MountService
+    let connections: [SMBConnection]
     @AppStorage("connectSharesOnLaunch") private var connectSharesOnLaunch = false
     @AppStorage("disconnectSharesOnQuit") private var disconnectSharesOnQuit = false
+    @State private var selectedTab: DiagnosticsTab = .logs
 
     var body: some View {
         VStack(spacing: 16) {
@@ -16,16 +25,53 @@ struct DiagnosticsConsoleView: View {
 
                 Spacer()
 
-                Picker("Visibility", selection: $loggingService.visibilityMode) {
-                    ForEach(LogVisibilityMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                Picker("View", selection: $selectedTab) {
+                    ForEach(DiagnosticsTab.allCases) { tab in
+                        Text(tab.rawValue.capitalized).tag(tab)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 320)
-                .help("Choose which diagnostic messages are visible")
+                .frame(width: 220)
             }
 
+            settingsPanel
+
+            if selectedTab == .logs {
+                logsView
+            } else {
+                healthView
+            }
+
+            HStack {
+                if selectedTab == .logs {
+                    Button("Copy Logs") {
+                        copy(loggingService.exportText())
+                    }
+                } else {
+                    Button("Copy Health JSON") {
+                        copy(mountService.exportHealthJSON(for: connections))
+                    }
+                }
+
+                Button("Clear") {
+                    loggingService.clear()
+                }
+                .disabled(selectedTab != .logs)
+
+                Spacer()
+
+                Button("Close") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 900, minHeight: 560)
+    }
+
+    private var settingsPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Automatic Retry Limit")
                     .font(.headline)
@@ -37,16 +83,51 @@ struct DiagnosticsConsoleView: View {
                         .monospacedDigit()
                 }
                 .frame(width: 220)
-                .help("Maximum number of automatic reconnect attempts before the app stops retrying")
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Probe Interval")
+                Slider(value: $mountService.probeIntervalSeconds, in: 10...120, step: 5)
+                Text("\(Int(mountService.probeIntervalSeconds))s")
+                    .monospacedDigit()
+                    .frame(width: 48)
+
+                Text("Session Refresh")
+                Slider(value: $mountService.sessionRefreshIntervalSeconds, in: 30...300, step: 10)
+                Text("\(Int(mountService.sessionRefreshIntervalSeconds))s")
+                    .monospacedDigit()
+                    .frame(width: 48)
+
+                Picker("Window", selection: $mountService.stabilityObservationWindow) {
+                    ForEach(StabilityObservationWindow.allCases) { window in
+                        Text(window.title).tag(window)
+                    }
+                }
+                .frame(width: 140)
+
+                Stepper(value: $mountService.benchmarkPayloadSizeMB, in: 1...64) {
+                    Text("Benchmark \(mountService.benchmarkPayloadSizeMB)MB")
+                        .monospacedDigit()
+                }
+                .frame(width: 220)
+            }
+            .font(.caption)
+
+            VStack(alignment: .leading, spacing: 8) {
                 Toggle("Connect auto-connect shares when the app launches", isOn: $connectSharesOnLaunch)
-                    .help("If enabled, the app connects shares marked Auto-connect as soon as the app opens")
-
                 Toggle("Disconnect connected shares when the app quits", isOn: $disconnectSharesOnQuit)
-                    .help("If enabled, the app disconnects all currently mounted shares during app termination")
             }
+        }
+    }
+
+    private var logsView: some View {
+        VStack(spacing: 12) {
+            Picker("Visibility", selection: $loggingService.visibilityMode) {
+                ForEach(LogVisibilityMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
 
             if loggingService.visibleEntries.isEmpty {
                 VStack(spacing: 8) {
@@ -84,30 +165,76 @@ struct DiagnosticsConsoleView: View {
                 }
                 .listStyle(.plain)
             }
+        }
+    }
 
-            HStack {
-                Button("Copy Logs") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(loggingService.exportText(), forType: .string)
+    private var healthView: some View {
+        let snapshots = mountService.healthSnapshots(for: connections)
+
+        return HSplitView {
+            List(snapshots) { snapshot in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(snapshot.displayName)
+                        .font(.headline)
+                    Text("\(snapshot.serverAddress)/\(snapshot.shareName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Text(snapshot.statusLabel)
+                        Text(snapshot.stabilityLabel)
+                        Text(snapshot.confidenceLabel)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
-                .help("Copy the current diagnostic log to the clipboard")
+                .padding(.vertical, 4)
+            }
 
-                Button("Clear") {
-                    loggingService.clear()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(connections) { connection in
+                        let details = mountService.runtimeDetails[connection.id] ?? SMBConnectionRuntimeDetails()
+                        GroupBox(connection.name.isEmpty ? connection.shareName : connection.name) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                detailLine("Status", mountService.statuses[connection.id]?.label ?? ConnectionStatus.disconnected.label)
+                                detailLine("Success Rate", String(format: "%.0f%%", details.successRate * 100))
+                                detailLine("Probe History", details.recentProbeLatencies.map(formatDuration).joined(separator: ", ").ifEmpty("No samples"))
+                                detailLine("Error Breakdown", formattedErrors(details.errorCounts))
+                                detailLine("Latest Error", details.lastErrorCategory?.title ?? "None")
+
+                                if details.timeline.isEmpty == false {
+                                    Divider()
+                                    ForEach(details.timeline.sorted(by: { $0.timestamp > $1.timestamp }).prefix(5), id: \.id) { event in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(event.title)
+                                                .font(.caption.weight(.semibold))
+                                            Text(event.details)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                 }
-                .help("Clear all collected diagnostic messages")
-
-                Spacer()
-
-                Button("Close") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-                .help("Close the diagnostics console")
+                .padding(.vertical, 4)
             }
         }
-        .padding(20)
-        .frame(minWidth: 760, minHeight: 420)
+    }
+
+    @ViewBuilder
+    private func detailLine(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .font(.caption)
     }
 
     private var emptyStateTitle: String {
@@ -136,5 +263,34 @@ struct DiagnosticsConsoleView: View {
         case .debug:
             return .secondary
         }
+    }
+
+    private func formattedErrors(_ errors: [String: Int]) -> String {
+        guard errors.isEmpty == false else {
+            return "None"
+        }
+
+        return errors
+            .sorted { $0.key < $1.key }
+            .map { "\(ConnectionErrorCategory(rawValue: $0.key)?.title ?? $0.key): \($0.value)" }
+            .joined(separator: " • ")
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        if duration < 1 {
+            return "\(Int((duration * 1000).rounded()))ms"
+        }
+        return String(format: "%.2fs", duration)
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String {
+        isEmpty ? fallback : self
     }
 }

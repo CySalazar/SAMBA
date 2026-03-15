@@ -3,25 +3,45 @@ import SwiftUI
 struct ConnectionRow: View {
     let connection: SMBConnection
     let status: ConnectionStatus
+    let runtimeDetails: SMBConnectionRuntimeDetails
     let onConnect: () -> Void
     let onDisconnect: () -> Void
-    /// Tracks the last non-connecting status so that the button label and
-    /// tint remain stable while the status oscillates through `.connecting`.
+    let onRunBenchmark: () -> Void
+    let onRefreshDetails: () -> Void
+    let onOpenMountPoint: () -> Void
+    let onCopyURL: () -> Void
     @State private var lastStableStatus: ConnectionStatus = .disconnected
 
     var body: some View {
         HStack(spacing: 12) {
-            // Status indicator
             StatusIndicator(status: status)
                 .help(statusTooltip)
 
-            // Connection info
-            VStack(alignment: .leading, spacing: 2) {
-                Text(connection.name.isEmpty ? connection.shareName : connection.name)
-                    .font(.headline)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(connection.name.isEmpty ? connection.shareName : connection.name)
+                        .font(.headline)
+                    ForEach(badges, id: \.self) { badge in
+                        Text(badge)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary, in: Capsule())
+                    }
+                }
+
                 Text(connectionSubtitle)
                     .font(.caption)
-                    .foregroundStyle(secondaryTextColor)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 10) {
+                    Text("Stability \(runtimeDetails.stabilityGrade.title)")
+                    Text("Probe \(formatted(duration: runtimeDetails.lastProbeLatency))")
+                    Text("Success \(Int((runtimeDetails.successRate * 100).rounded()))%")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
                 if let errorMessage {
                     Text(errorMessage)
                         .font(.caption)
@@ -33,7 +53,6 @@ struct ConnectionRow: View {
 
             Spacer()
 
-            // Auto-connect badge
             if connection.autoConnect {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.caption)
@@ -41,7 +60,6 @@ struct ConnectionRow: View {
                     .help("Auto-connect is enabled for this SMB share")
             }
 
-            // Connect/Disconnect button
             Button(action: {
                 if lastStableStatus == .connected {
                     onDisconnect()
@@ -57,7 +75,15 @@ struct ConnectionRow: View {
             .disabled(status == .connecting)
             .help(buttonTooltip)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .contextMenu {
+            Button("Copy SMB URL", action: onCopyURL)
+            Button("Open Mount Point", action: onOpenMountPoint)
+                .disabled(status != .connected)
+            Button("Refresh Details", action: onRefreshDetails)
+            Button("Run Benchmark", action: onRunBenchmark)
+                .disabled(status != .connected || runtimeDetails.isBenchmarkRunning)
+        }
         .onAppear {
             if status != .connecting {
                 lastStableStatus = status
@@ -70,28 +96,31 @@ struct ConnectionRow: View {
         }
     }
 
-    private var statusColor: Color {
-        switch status {
-        case .connected: return .green
-        case .connecting: return .yellow
-        case .disconnected: return .red
-        case .error: return .orange
+    private var badges: [String] {
+        var badges: [String] = []
+        if connection.shareName.hasSuffix("$") {
+            badges.append("Hidden")
         }
+        if let protocolVersion = runtimeDetails.protocolVersion, protocolVersion.isEmpty == false {
+            badges.append(protocolVersion)
+        }
+        if runtimeDetails.stabilityGrade == .low {
+            badges.append("Unstable")
+        }
+        if let latency = runtimeDetails.lastProbeLatency, latency >= 1.0 {
+            badges.append("High Latency")
+        }
+        return badges
     }
 
     private var connectionSubtitle: String {
-        return "\(connection.serverAddress)/\(connection.shareName)"
-    }
-
-    private var secondaryTextColor: Color {
-        return .secondary
+        "\(connection.serverAddress)/\(connection.shareName)"
     }
 
     private var errorMessage: String? {
         if case .error(let message) = status {
             return message
         }
-
         return nil
     }
 
@@ -128,6 +157,16 @@ struct ConnectionRow: View {
         case .error:
             return "Retry connecting this SMB share"
         }
+    }
+
+    private func formatted(duration: TimeInterval?) -> String {
+        guard let duration else {
+            return "n/a"
+        }
+        if duration < 1 {
+            return "\(Int((duration * 1000).rounded())) ms"
+        }
+        return String(format: "%.2f s", duration)
     }
 }
 
