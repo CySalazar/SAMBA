@@ -12,6 +12,7 @@ struct ConnectionRow: View {
             Circle()
                 .fill(statusColor)
                 .frame(width: 10, height: 10)
+                .help(statusTooltip)
 
             // Connection info
             VStack(alignment: .leading, spacing: 2) {
@@ -29,7 +30,7 @@ struct ConnectionRow: View {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .help("Auto-connect enabled")
+                    .help("Auto-connect is enabled for this SMB share")
             }
 
             // Connect/Disconnect button
@@ -46,6 +47,7 @@ struct ConnectionRow: View {
             .buttonStyle(.borderedProminent)
             .tint(status == .connected ? .red : .accentColor)
             .disabled(status == .connecting)
+            .help(buttonTooltip)
         }
         .padding(.vertical, 4)
     }
@@ -65,6 +67,32 @@ struct ConnectionRow: View {
         case .connecting: return "Connecting…"
         case .disconnected: return "Connect"
         case .error: return "Retry"
+        }
+    }
+
+    private var statusTooltip: String {
+        switch status {
+        case .connected:
+            return "This SMB share is currently connected"
+        case .connecting:
+            return "Connection in progress"
+        case .disconnected:
+            return "This SMB share is currently disconnected"
+        case .error(let message):
+            return "Connection error: \(message)"
+        }
+    }
+
+    private var buttonTooltip: String {
+        switch status {
+        case .connected:
+            return "Disconnect this SMB share"
+        case .connecting:
+            return "Connection is in progress"
+        case .disconnected:
+            return "Connect this SMB share"
+        case .error:
+            return "Retry connecting this SMB share"
         }
     }
 }

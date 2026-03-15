@@ -12,13 +12,16 @@ struct PersistenceService {
 
     static func load() -> [SMBConnection] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            LoggingService.shared.record(.debug, category: .persistence, message: "No persisted connections found at \(fileURL.path)")
             return []
         }
         do {
             let data = try Data(contentsOf: fileURL)
-            return try JSONDecoder().decode([SMBConnection].self, from: data)
+            let connections = try JSONDecoder().decode([SMBConnection].self, from: data)
+            LoggingService.shared.record(.info, category: .persistence, message: "Loaded \(connections.count) persisted connections")
+            return connections
         } catch {
-            print("Failed to load connections: \(error)")
+            LoggingService.shared.record(.error, category: .persistence, message: "Failed to load connections: \(error.localizedDescription)")
             return []
         }
     }
@@ -28,8 +31,9 @@ struct PersistenceService {
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(connections)
             try data.write(to: fileURL, options: .atomic)
+            LoggingService.shared.record(.info, category: .persistence, message: "Saved \(connections.count) connections")
         } catch {
-            print("Failed to save connections: \(error)")
+            LoggingService.shared.record(.error, category: .persistence, message: "Failed to save connections: \(error.localizedDescription)")
         }
     }
 }

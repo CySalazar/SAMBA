@@ -16,6 +16,11 @@
 		AA000007 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000007; };
 		AA000008 /* PersistenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000008; };
 		AA000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AB000009; };
+		AA00000A /* LoggingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000C; };
+		AA00000B /* SMBDiscoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000D; };
+		AA00000C /* SMBShareDiscoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000E; };
+		AA00000D /* DiagnosticsConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000F; };
+		AA00000E /* DiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000010; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +35,11 @@
 		AB000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AB00000A /* SMBMountManager.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SMBMountManager.entitlements; sourceTree = "<group>"; };
 		AB00000B /* SMBMountManager.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SMBMountManager.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB00000C /* LoggingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoggingService.swift; sourceTree = "<group>"; };
+		AB00000D /* SMBDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMBDiscoveryService.swift; sourceTree = "<group>"; };
+		AB00000E /* SMBShareDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMBShareDiscoveryService.swift; sourceTree = "<group>"; };
+		AB00000F /* DiagnosticsConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsConsoleView.swift; sourceTree = "<group>"; };
+		AB000010 /* DiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,6 +88,8 @@
 				AB000003 /* ContentView.swift */,
 				AB000004 /* ConnectionRow.swift */,
 				AB000005 /* ConnectionEditView.swift */,
+				AB00000F /* DiagnosticsConsoleView.swift */,
+				AB000010 /* DiscoveryView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -88,6 +100,9 @@
 				AB000006 /* MountService.swift */,
 				AB000007 /* KeychainService.swift */,
 				AB000008 /* PersistenceService.swift */,
+				AB00000C /* LoggingService.swift */,
+				AB00000D /* SMBDiscoveryService.swift */,
+				AB00000E /* SMBShareDiscoveryService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -110,6 +125,7 @@
 				AE000002 /* Sources */,
 				AC000001 /* Frameworks */,
 				AE000003 /* Resources */,
+				AE000004 /* Increment Revision */,
 			);
 			buildRules = (
 			);
@@ -164,6 +180,30 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		AE000004 /* Increment Revision */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Increment Revision";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			alwaysOutOfDate = 1;
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "source_plist=$SRCROOT/SMBMountManager/Info.plist\ncurrent_revision=$(/usr/libexec/PlistBuddy -c 'Print :AppRevision' \"$source_plist\" 2>/dev/null || echo '0')\nnext_revision=$((current_revision + 1))\n/usr/libexec/PlistBuddy -c \"Set :AppRevision ${next_revision}\" \"$source_plist\" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c \"Add :AppRevision string ${next_revision}\" \"$source_plist\" >/dev/null\nif [ -n \"$TARGET_BUILD_DIR\" ] && [ -n \"$INFOPLIST_PATH\" ] && [ -f \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" ]; then\n  /usr/libexec/PlistBuddy -c \"Set :AppRevision ${next_revision}\" \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c \"Add :AppRevision string ${next_revision}\" \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" >/dev/null\n  /usr/libexec/PlistBuddy -c \"Set :CFBundleVersion ${next_revision}\" \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" >/dev/null 2>&1 || true\nfi\necho \"Incremented app revision to ${next_revision}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+
 /* Begin PBXSourcesBuildPhase section */
 		AE000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -177,6 +217,11 @@
 				AA000006 /* MountService.swift in Sources */,
 				AA000007 /* KeychainService.swift in Sources */,
 				AA000008 /* PersistenceService.swift in Sources */,
+				AA00000A /* LoggingService.swift in Sources */,
+				AA00000B /* SMBDiscoveryService.swift in Sources */,
+				AA00000C /* SMBShareDiscoveryService.swift in Sources */,
+				AA00000D /* DiagnosticsConsoleView.swift in Sources */,
+				AA00000E /* DiscoveryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -220,7 +265,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -282,7 +327,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -311,10 +356,9 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SMBMountManager/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMainStoryboardFile = "";
-				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -339,10 +383,9 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SMBMountManager/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMainStoryboardFile = "";
-				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

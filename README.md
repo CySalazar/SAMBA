@@ -14,6 +14,9 @@ A native macOS application for managing SMB network share connections. Easily mo
   - Red: Disconnected
   - Orange: Error
 - **Secure Credential Storage** — Passwords are stored exclusively in the macOS Keychain, never written to disk
+- **Network Discovery** — Automatically discover SMB servers on the local network via Bonjour (`_smb._tcp`). Select a discovered host to pre-fill the connection form
+- **Share Discovery** — Query the list of available shares on a server directly from the connection form using `smbutil`
+- **Diagnostics Console** — Built-in log viewer with four visibility modes (Hidden, Errors Only, Standard, All). Logs can be copied to clipboard or cleared
 
 ## Screenshots
 
@@ -25,7 +28,7 @@ The main window displays all configured SMB connections in a clean list. Each ro
 ### Add / Edit Connection
 ![Add Connection](screenshots/add-connection.png)
 
-The connection form allows you to configure all the details for an SMB share: a friendly display name, the server address (IP or hostname), the share name, and authentication credentials. The **Auto-connect** toggle enables automatic reconnection every 30 seconds when the share drops. Passwords are securely stored in the macOS Keychain and never written to disk.
+The connection form allows you to configure all the details for an SMB share: a friendly display name, the server address (IP or hostname), the share name, and authentication credentials. The **Auto-connect** toggle enables automatic reconnection every 30 seconds when the share drops. Passwords are securely stored in the macOS Keychain and never written to disk. The **Share Discovery** section lets you query available shares on the server using the current credentials.
 
 ## Requirements
 
@@ -65,8 +68,27 @@ The connection form allows you to configure all the details for an SMB share: a 
    - **Share name** — The name of the shared folder on the server.
    - **Username** — Your SMB account username.
    - **Password** — Your SMB account password (stored in Keychain).
-3. Optionally enable **Auto-connect** to automatically reconnect when the share drops.
-4. Click **Save**.
+3. Optionally click **Discover Shares** to list the shares available on the server (requires server, username, and password to be filled in). Select a share from the dropdown to auto-fill the share name.
+4. Optionally enable **Auto-connect** to automatically reconnect when the share drops.
+5. Click **Save**.
+
+### Discovering SMB Servers
+
+1. Click the **network** icon in the toolbar to open the Discovery panel.
+2. The app automatically scans the local network for SMB servers published via Bonjour.
+3. Click **Use** next to a discovered server to pre-fill the connection form with its hostname.
+4. Click **Refresh** to re-scan the network.
+
+### Diagnostics Console
+
+1. Click the **text** icon in the toolbar to open the Diagnostics Console.
+2. Use the segmented control to switch between visibility modes:
+   - **Hidden** — No logs displayed
+   - **Errors Only** — Only error-level entries
+   - **Standard** — Errors, warnings, and info (default)
+   - **All** — Includes debug-level entries
+3. Click **Copy Logs** to copy all entries to the clipboard in ISO 8601 format.
+4. Click **Clear** to remove all recorded entries.
 
 ### Connecting and Disconnecting
 
@@ -93,6 +115,7 @@ When enabled for a connection, the app automatically attempts to mount the share
 |------|----------|--------|
 | Connections (metadata) | `~/Library/Application Support/SMBMountManager/connections.json` | JSON |
 | Passwords | macOS Keychain (service: `com.smb-mount-manager`) | Encrypted |
+| Log visibility mode | `UserDefaults` (key: `logVisibilityMode`) | String |
 
 - Passwords are **never** written to the JSON file — only the connection metadata (name, server, share, username, auto-connect flag) is persisted.
 - Deleting a connection also removes its Keychain entry.
@@ -109,12 +132,18 @@ SAMBA/
 │   │   ├── Views/
 │   │   │   ├── ContentView.swift           # Main window with connection list
 │   │   │   ├── ConnectionRow.swift         # Individual connection row component
-│   │   │   └── ConnectionEditView.swift    # Add/edit connection form
+│   │   │   ├── ConnectionEditView.swift    # Add/edit connection form + share discovery
+│   │   │   ├── DiscoveryView.swift         # Bonjour SMB server discovery panel
+│   │   │   └── DiagnosticsConsoleView.swift # Diagnostics log viewer
 │   │   ├── Services/
 │   │   │   ├── MountService.swift          # Mount, unmount, and status monitoring
 │   │   │   ├── KeychainService.swift       # Secure password CRUD via Keychain
-│   │   │   └── PersistenceService.swift    # JSON file persistence
+│   │   │   ├── PersistenceService.swift    # JSON file persistence
+│   │   │   ├── LoggingService.swift        # Centralized logging with severity/category
+│   │   │   ├── SMBDiscoveryService.swift   # Bonjour network browser for SMB hosts
+│   │   │   └── SMBShareDiscoveryService.swift # Share enumeration via smbutil
 │   │   ├── Assets.xcassets/                # App icon assets
+│   │   ├── Info.plist                      # Bonjour service declarations
 │   │   └── SMBMountManager.entitlements    # Network client entitlement
 │   ├── SMBMountManager.xcodeproj/          # Xcode project configuration
 │   └── generate_icon.py                    # App icon generation script

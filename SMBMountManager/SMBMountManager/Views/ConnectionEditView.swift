@@ -4,6 +4,7 @@ struct ConnectionEditView: View {
     @Environment(\.dismiss) private var dismiss
 
     let existing: SMBConnection?
+    let suggestedHost: DiscoveredSMBHost?
     let onSave: (SMBConnection, String) -> Void
 
     @State private var name: String = ""
@@ -12,6 +13,10 @@ struct ConnectionEditView: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var autoConnect: Bool = false
+    @State private var discoveredShares: [String] = []
+    @State private var selectedDiscoveredShare = ""
+    @State private var shareDiscoveryError: String?
+    @State private var isDiscoveringShares = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,6 +27,46 @@ struct ConnectionEditView: View {
                 TextField("Username", text: $username)
                 SecureField("Password", text: $password)
                 Toggle("Auto-connect", isOn: $autoConnect)
+
+                Section("Share Discovery") {
+                    HStack {
+                        Button(isDiscoveringShares ? "Discovering…" : "Discover Shares") {
+                            discoverShares()
+                        }
+                        .disabled(isDiscoveringShares || !canDiscoverShares)
+
+                        if isDiscoveringShares {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+
+                    if !discoveredShares.isEmpty {
+                        Picker("Available shares", selection: $selectedDiscoveredShare) {
+                            Text("Select a share").tag("")
+                            ForEach(discoveredShares, id: \.self) { share in
+                                Text(share).tag(share)
+                            }
+                        }
+                        .onChange(of: selectedDiscoveredShare) { newValue in
+                            guard !newValue.isEmpty else { return }
+                            shareName = newValue
+                            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                name = newValue
+                            }
+                        }
+                    }
+
+                    if let shareDiscoveryError {
+                        Text(shareDiscoveryError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("Use the current server and credentials to query the list of available shares.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
             .frame(minWidth: 400)
@@ -51,6 +96,12 @@ struct ConnectionEditView: View {
         !password.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    private var canDiscoverShares: Bool {
+        !serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func save() {
         let connection = SMBConnection(
             id: existing?.id ?? UUID(),
@@ -60,12 +111,48 @@ struct ConnectionEditView: View {
             username: username.trimmingCharacters(in: .whitespaces),
             autoConnect: autoConnect
         )
+        LoggingService.shared.record(.info, category: .ui, message: "Saving connection for \(connection.serverAddress)/\(connection.shareName)")
         onSave(connection, password)
         dismiss()
     }
 
-    init(existing: SMBConnection?, onSave: @escaping (SMBConnection, String) -> Void) {
+    private func discoverShares() {
+        shareDiscoveryError = nil
+        isDiscoveringShares = true
+
+        Task {
+            do {
+                let shares = try await SMBShareDiscoveryService.discoverShares(
+                    serverAddress: serverAddress,
+                    username: username,
+                    password: password
+                )
+
+                await MainActor.run {
+                    discoveredShares = shares
+                    if shares.count == 1, let onlyShare = shares.first {
+                        selectedDiscoveredShare = onlyShare
+                        shareName = onlyShare
+                    }
+                    isDiscoveringShares = false
+                }
+            } catch {
+                await MainActor.run {
+                    discoveredShares = []
+                    shareDiscoveryError = error.localizedDescription
+                    isDiscoveringShares = false
+                }
+            }
+        }
+    }
+
+    init(
+        existing: SMBConnection?,
+        suggestedHost: DiscoveredSMBHost? = nil,
+        onSave: @escaping (SMBConnection, String) -> Void
+    ) {
         self.existing = existing
+        self.suggestedHost = suggestedHost
         self.onSave = onSave
 
         if let conn = existing {
@@ -75,6 +162,9 @@ struct ConnectionEditView: View {
             _username = State(initialValue: conn.username)
             _autoConnect = State(initialValue: conn.autoConnect)
             _password = State(initialValue: KeychainService.loadPassword(for: conn.id) ?? "")
+        } else if let suggestedHost {
+            _name = State(initialValue: suggestedHost.displayName)
+            _serverAddress = State(initialValue: suggestedHost.normalizedHostName)
         }
     }
 }
