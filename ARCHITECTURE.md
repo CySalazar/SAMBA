@@ -6,27 +6,31 @@ This document describes the technical architecture of SMB Mount Manager for deve
 
 The application follows **MVVM (Model-View-ViewModel)**:
 
-- **Model** — `SMBConnection` struct and `ConnectionStatus` enum
+- **Model** — `SMBConnection`, `ConnectionStatus`, and the `SMBShareDetails` types (stability grades, runtime details, health snapshots, benchmark results, timeline events, error categories)
 - **ViewModel** — `MountService`, `SMBDiscoveryService`, `LoggingService` (shared `ObservableObject` instances managing state and business logic)
 - **View** — SwiftUI views (`ContentView`, `ConnectionRow`, `ConnectionEditView`, `DiscoveryView`, `DiagnosticsConsoleView`)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Views (SwiftUI)                                                            │
-│  ContentView · ConnectionRow · ConnectionEditView                           │
-│  DiscoveryView · DiagnosticsConsoleView                                     │
-└──────────┬──────────────────┬──────────────────┬────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Views (SwiftUI)                                                                │
+│  ContentView · ConnectionRow · ConnectionEditView                               │
+│  DiscoveryView · DiagnosticsConsoleView · ConnectionDetailsSheet                │
+└──────────┬──────────────────┬──────────────────┬────────────────────────────────┘
            │ @StateObject     │ @StateObject     │ @StateObject
 ┌──────────▼────────┐ ┌──────▼───────────┐ ┌────▼─────────────────────┐
 │  MountService     │ │SMBDiscoveryServ. │ │ LoggingService (shared)  │
 │  (mount/unmount)  │ │(Bonjour browser) │ │ (centralized logging)    │
+│  (telemetry)      │ │(IP resolution)   │ │                          │
+│  (benchmarking)   │ │                  │ │                          │
+│  (health monitor) │ │                  │ │                          │
 └────┬────┬────┬────┘ └──────────────────┘ └──────────────────────────┘
      │    │    │
 ┌────▼──┐ ┌▼───────────┐ ┌▼────────────────┐
 │Keychn.│ │Persistence │ │ System APIs     │
-│Service│ │Service     │ │ NSWorkspace     │
-│       │ │(JSON file) │ │ umount/diskutil │
-│       │ │            │ │ statfs/smbutil  │
+│Service│ │Service     │ │ /sbin/mount     │
+│       │ │(JSON files)│ │ umount/diskutil │
+│       │ │connections │ │ statfs/smbutil  │
+│       │ │runtime-det.│ │                 │
 └───────┘ └────────────┘ └─────────────────┘
 ```
 
@@ -49,7 +53,7 @@ A `Codable`, `Identifiable`, `Equatable` struct representing a saved SMB connect
 
 **Computed properties:**
 
-- `mountPoint` → `/Volumes/{shareName}`
+- `mountPoint` → `~/Volumes/{sanitizedServer}-{sanitizedShare}` where `/` and `:` are replaced with `-`. Falls back to the connection's UUID string if both server and share are empty after sanitization.
 - `smbURL` → `smb://{serverAddress}/{shareName}`
 
 ### ConnectionStatus
@@ -59,11 +63,144 @@ An enum representing the runtime state of a connection:
 | Case | Indicator Color | Description |
 |------|----------------|-------------|
 | `.disconnected` | Red | Share is not mounted |
-| `.connecting` | Yellow | Mount or unmount in progress |
+| `.connecting` | Yellow (animated) | Mount or unmount in progress |
 | `.connected` | Green | Share is mounted and verified as `smbfs` |
 | `.error(String)` | Orange | Operation failed with a message |
 
-`ConnectionStatus` is `Equatable` but **not** `Codable` — it is runtime-only state, never persisted.
+`ConnectionStatus` is `Equatable` but **not** `Codable` — it is runtime-only state, never persisted. The `label` property returns a human-readable description of the current state.
+
+### SMBShareDetails Types
+
+**File:** `SMBMountManager/Models/SMBShareDetails.swift`
+
+This file defines all types used for share discovery, health monitoring, telemetry, and benchmarking.
+
+#### DiscoveredSMBShare
+
+An `Identifiable`, `Hashable`, `Codable` struct representing a share found during discovery.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `name` | `String` | Share name on the server |
+| `type` | `String` | Share type (e.g., disk, printer) |
+| `comment` | `String` | Server-provided description |
+| `serverAddress` | `String` | Address of the server hosting the share |
+
+**Computed properties:**
+
+- `id` → `"{serverAddress}/{name}"` (lowercased)
+- `isHidden` → `true` if the share name ends with `$`
+- `smbURL` → `"smb://{serverAddress}/{name}"`
+
+#### ConnectionStabilityGrade
+
+An enum assessing connection reliability over time:
+
+| Case | Title |
+|------|-------|
+| `.insufficientHistory` | "Insufficient History" |
+| `.low` | "Low" |
+| `.medium` | "Medium" |
+| `.high` | "High" |
+
+#### ConnectionConfidenceLevel
+
+An enum expressing how much data backs the stability assessment:
+
+| Case | Title |
+|------|-------|
+| `.low` | "Low" |
+| `.medium` | "Medium" |
+| `.high` | "High" |
+
+#### StabilityObservationWindow
+
+An enum defining the time window for stability analysis:
+
+| Case | Title |
+|------|-------|
+| `.session` | "Session" |
+| `.last24Hours` | "24 Hours" |
+| `.last7Days` | "7 Days" |
+
+#### ConnectionErrorCategory
+
+An enum classifying mount and runtime errors:
+
+| Case | Title |
+|------|-------|
+| `.authentication` | "Authentication" |
+| `.connectivity` | "Connectivity" |
+| `.timeout` | "Timeout" |
+| `.shareNotFound` | "Share Not Found" |
+| `.mountPointBusy` | "Mount Point Busy" |
+| `.benchmark` | "Benchmark" |
+| `.unknown` | "Unknown" |
+
+#### ConnectionTimelineEvent
+
+An `Identifiable`, `Codable`, `Hashable` struct recording a notable event for a connection.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `UUID` | Unique event identifier |
+| `timestamp` | `Date` | When the event occurred |
+| `kind` | `ConnectionTimelineEventKind` | `.status`, `.probe`, `.benchmark`, `.session`, or `.note` |
+| `title` | `String` | Short event summary |
+| `details` | `String` | Extended description |
+
+#### SMBBenchmarkResult
+
+A `Codable`, `Hashable` struct storing the outcome of a read/write throughput test.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `timestamp` | `Date` | When the benchmark ran |
+| `payloadSizeBytes` | `Int` | Size of the test file in bytes |
+| `writeDuration` | `TimeInterval` | Time to write the payload |
+| `readDuration` | `TimeInterval` | Time to read the payload back |
+
+**Computed properties:**
+
+- `writeThroughputMBps` → payload size (MB) / write duration
+- `readThroughputMBps` → payload size (MB) / read duration
+
+#### SMBConnectionRuntimeDetails
+
+A `Codable`, `Hashable` struct containing comprehensive telemetry for a single connection. This is the primary data structure published by `MountService` and persisted to `runtime-details.json`.
+
+| Property Group | Key Properties |
+|---------------|----------------|
+| Probe metrics | `lastProbeLatency`, `averageProbeLatency`, `probeLatencyJitter`, `recentProbeLatencies` |
+| Mount counters | `successfulMounts`, `failedMounts`, `disconnectCount`, `automaticRetryCount` |
+| Duration tracking | `totalConnectedDuration`, `totalDisconnectedDuration` |
+| Volume details | `mountedVolumePath`, `volumeName`, `volumeTotalCapacityBytes`, `volumeAvailableCapacityBytes` |
+| Session info | `protocolVersion`, `signingState`, `encryptionState`, `multichannelState`, `sessionAttributes` |
+| Error tracking | `errorCounts: [String: Int]`, `lastErrorCategory` |
+| Timeline | `timeline: [ConnectionTimelineEvent]` |
+| Benchmark | `benchmarkResult`, `benchmarkStatusMessage`, `isBenchmarkRunning` |
+| Stability | `stabilityGrade`, `confidenceLevel` |
+
+**Computed properties:**
+
+- `successRate` → `successfulMounts / (successfulMounts + failedMounts)`
+
+#### ConnectionHealthSnapshot
+
+An `Identifiable`, `Hashable` struct providing a summary view of a connection's health for the diagnostics UI.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `UUID` | Connection identifier |
+| `displayName` | `String` | Connection display name |
+| `serverAddress` | `String` | Server address |
+| `shareName` | `String` | Share name |
+| `statusLabel` | `String` | Current connection status text |
+| `stabilityLabel` | `String` | Stability grade text |
+| `confidenceLabel` | `String` | Confidence level text |
+| `successRate` | `Double` | Mount success ratio (0–1) |
+| `lastProbeLatency` | `TimeInterval?` | Latest probe measurement |
+| `topErrorCategory` | `String` | Most frequent error category |
 
 ## Services
 
@@ -71,11 +208,31 @@ An enum representing the runtime state of a connection:
 
 **File:** `SMBMountManager/Services/MountService.swift`
 
-The central service managing all mount operations and status monitoring. Decorated with `@MainActor` and conforms to `ObservableObject`.
+The central service managing all mount operations, status monitoring, telemetry, and benchmarking. Decorated with `@MainActor` and conforms to `ObservableObject`.
 
 **Published state:**
 
-- `statuses: [UUID: ConnectionStatus]` — drives all UI updates via SwiftUI's observation system.
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `statuses` | `[UUID: ConnectionStatus]` | `[:]` | Drives all UI status updates via SwiftUI observation |
+| `runtimeDetails` | `[UUID: SMBConnectionRuntimeDetails]` | Loaded from disk | Per-connection telemetry, persisted to `runtime-details.json` |
+| `maximumAutomaticRetryCount` | `Int` | `5` | Maximum auto-reconnect attempts before stopping |
+| `probeIntervalSeconds` | `Double` | `20` | Minimum seconds between passive probe measurements |
+| `sessionRefreshIntervalSeconds` | `Double` | `60` | Minimum seconds between `smbutil` session detail refreshes |
+| `stabilityObservationWindow` | `StabilityObservationWindow` | `.session` | Time window for stability grade computation |
+| `benchmarkPayloadSizeMB` | `Int` | `4` | File size for read/write throughput tests |
+
+All configurable properties are persisted to `UserDefaults` and restored on init.
+
+**Private state:**
+
+| Property | Purpose |
+|----------|---------|
+| `pendingMountRequests` | Queue of mount operations waiting to execute |
+| `activeMountRequest` | The currently executing mount operation (at most one) |
+| `automaticRetryCounts` | Per-connection count of consecutive automatic retries |
+| `consecutiveMissedChecks` | Per-connection count of refresh cycles where `isMounted` returned false |
+| `telemetry` | Per-connection internal tracking state (timestamps, duration counters) |
 
 **Timers:**
 
@@ -87,21 +244,34 @@ The central service managing all mount operations and status monitoring. Decorat
 **Mount flow:**
 
 1. Load password from `KeychainService`.
-2. Percent-encode username and password for URL safety.
-3. Construct URL: `smb://user:pass@server/share`.
-4. Call `NSWorkspace.shared.open(url)` to delegate mounting to macOS.
-5. Poll up to 15 times (once per second) for the mount to appear via `statfs()`.
+2. Create the mount point directory at `~/Volumes/{server}-{share}` if it does not exist.
+3. Execute `/sbin/mount -t smbfs -o nobrowse,nopassprompt //user:pass@server/share mountPoint`.
+4. Poll up to 15 times (once per second) for the mount to appear via `isMounted()`.
+5. On success: schedule post-mount verification (3-second delay), force a session detail refresh, run a passive probe.
+6. On failure: parse stderr to categorize the error (via `userFacingMountError`), register the failure in telemetry.
+7. Mount requests are serialized — only one runs at a time; additional requests are queued and processed in order.
 
 **Unmount flow:**
 
-1. Execute `/sbin/umount {mountPoint}`.
-2. If that fails (non-zero exit), fall back to `/usr/sbin/diskutil unmount {mountPoint}`.
+1. Resolve the actual mounted volume URL (may differ from the expected mount point).
+2. Execute `/sbin/umount {mountedPath}`.
+3. If that fails (non-zero exit), fall back to `/usr/sbin/diskutil unmount {mountedPath}`.
 
 **Status check:**
 
-- First checks the default mount point (`/Volumes/{shareName}`) via `statfs()`.
-- If not found, enumerates all mounted volumes and matches by `volumeURLForRemountingKey` (host + share name comparison).
-- Verifies the filesystem type string is `"smbfs"`.
+- Checks the expected mount point and all mounted volumes for a matching `smbfs` volume.
+- Uses `statfs()` for direct path checks and `FileManager.mountedVolumeURLs` for enumeration.
+- A connected status requires **2 consecutive missed checks** (`missedCheckThreshold`) before downgrading to disconnected, preventing UI flickering from transient filesystem enumeration gaps.
+
+**Telemetry subsystem:**
+
+| Method | Description |
+|--------|-------------|
+| `runPassiveProbeIfNeeded(for:)` | Measures directory listing latency on the mounted volume at the configured probe interval. Updates `lastProbeLatency`, `averageProbeLatency`, `probeLatencyJitter`, and `recentProbeLatencies`. |
+| `refreshSessionDetailsIfNeeded(for:)` | Runs `smbutil statshares -j` and `smbutil multichannel -j` to collect protocol version, signing state, encryption state, multichannel state, and session attributes. |
+| `runBenchmark(for:)` | Writes a random-data temp file of `benchmarkPayloadSizeMB` to the mounted volume, reads it back, and records the `SMBBenchmarkResult`. |
+| `healthSnapshots(for:)` | Produces `[ConnectionHealthSnapshot]` summaries for the diagnostics health view. |
+| `exportHealthJSON(for:)` | Serializes health snapshots as a JSON string for clipboard export. |
 
 ### KeychainService
 
@@ -126,16 +296,25 @@ A static struct wrapping macOS Security framework APIs for password management.
 
 **File:** `SMBMountManager/Services/PersistenceService.swift`
 
-A static struct handling JSON serialization of connections to disk.
+A static struct handling JSON serialization of connections and runtime details to disk.
 
 | Method | Description |
 |--------|-------------|
-| `load()` | Reads and decodes `[SMBConnection]` from JSON file |
-| `save(_:)` | Encodes connections and writes atomically to JSON file |
+| `load()` | Reads and decodes `[SMBConnection]` from `connections.json` |
+| `save(_:)` | Encodes connections and writes atomically to `connections.json` |
+| `loadRuntimeDetails()` | Reads and decodes `[UUID: SMBConnectionRuntimeDetails]` from `runtime-details.json` using ISO 8601 date decoding |
+| `saveRuntimeDetails(_:)` | Encodes runtime details with pretty printing, sorted keys, and ISO 8601 dates; writes atomically to `runtime-details.json` |
 
-**Storage path:** `~/Library/Application Support/SMBMountManager/connections.json`
+**Storage paths:**
+
+| File | Path |
+|------|------|
+| `connections.json` | `~/Library/Application Support/SMBMountManager/connections.json` |
+| `runtime-details.json` | `~/Library/Application Support/SMBMountManager/runtime-details.json` |
 
 The directory is created automatically with `withIntermediateDirectories: true` on first save.
+
+**PersistedConnectionState** — a nested `Codable` struct bundling `connections` and `runtimeDetails` for potential combined serialization.
 
 ### LoggingService
 
@@ -182,9 +361,22 @@ An `@MainActor` `ObservableObject` that browses the local network for SMB server
 
 - Searches for `_smb._tcp.` services in the `local.` domain.
 - Each discovered service is resolved with a 5-second timeout to obtain the hostname and port.
+- IP addresses are resolved using `getnameinfo()` with `NI_NUMERICHOST` on the service's socket addresses.
+- Resolution duration is tracked via `resolveStartedAt` timestamps.
 - Services that disappear from the network are automatically removed from the list.
 
-**DiscoveredSMBHost** — a value type with `serviceName`, `hostName`, and `port`. The `normalizedHostName` strips trailing dots from Bonjour hostnames.
+**DiscoveredSMBHost** — a value type representing a discovered server:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `serviceName` | `String` | Bonjour service name |
+| `hostName` | `String` | Resolved hostname |
+| `port` | `Int` | SMB port |
+| `ipAddresses` | `[String]` | Resolved IP addresses (IPv4/IPv6) |
+| `lastResolvedAt` | `Date` | Timestamp of the last successful resolution |
+| `resolveDuration` | `TimeInterval?` | How long resolution took |
+
+**Computed properties:** `displayName`, `normalizedHostName` (strips trailing dots), `secondaryDetails` (formatted IP addresses and port).
 
 ### SMBShareDiscoveryService
 
@@ -208,45 +400,80 @@ The root view of the application. Owns the `MountService`, `LoggingService`, and
 
 **State management:**
 
-- `@StateObject mountService` — mount/unmount observable service
+- `@StateObject mountService` — mount/unmount, telemetry, and benchmarking
 - `@StateObject loggingService` — shared logging singleton
 - `@StateObject discoveryService` — Bonjour browser
+- `@AppStorage connectSharesOnLaunch` — auto-connect on launch toggle
+- `@AppStorage disconnectSharesOnQuit` — auto-disconnect on quit toggle
 - `@State connections` — the array of saved connections
 - `@State editingConnection` — triggers the edit sheet
+- `@State selectedConnection` — triggers the connection details sheet
 - `@State isAddingNew` — triggers the add sheet
 - `@State isShowingDiagnostics` — triggers the diagnostics console sheet
 - `@State isShowingDiscovery` — triggers the discovery panel sheet
 - `@State suggestedHost` — pre-fills the connection form from a discovered host
+- `@State hasAppliedLaunchBehavior` — ensures connect-on-launch runs once
+- `@State searchText` — filter bar search input
+- `@State statusFilter` — filter by connection status (all / connected / disconnected / errors / unstable)
+- `@State sortMode` — sort connections (name / host / status / latency / stability)
+
+**Filtering and sorting:**
+
+The `filteredConnections` computed property implements a three-stage pipeline:
+1. **Search** — matches connection name, server address, share name, or username against `searchText`.
+2. **Status filter** — filters by `ConnectionStatusFilter` cases (All, Connected, Disconnected, Errors, Unstable).
+3. **Sort** — orders by `ConnectionSortMode` (Name, Host, Status, Latency, Stability).
+
+**Connection Details Sheet:**
+
+An inline private struct (`ConnectionDetailsSheet`) opened when tapping a connection row. Displays five sections:
+- **Live** — current status, mount point, volume capacity, protocol, signing, encryption, multichannel
+- **Historical** — successful/failed mounts, disconnects, automatic retries, connected/disconnected duration
+- **Estimated** — stability grade, confidence level, success rate, probe latency, jitter
+- **Manual Benchmark** — read/write throughput with a "Run Benchmark" button
+- **Timeline** — recent events sorted newest-first (status changes, probes, benchmarks, sessions)
 
 **Lifecycle:**
 
-- `onAppear`: loads connections from `PersistenceService`, starts monitoring, records app log entry.
-- `onDisappear`: stops monitoring timers, records app log entry.
+- `onAppear`: loads connections from `PersistenceService`, starts monitoring, optionally connects auto-connect shares on launch.
+- `onDisappear`: stops monitoring timers, optionally disconnects all shares on quit.
 
 **Key behaviors:**
 
 - Toolbar buttons: Connect All, Disconnect All, Discover SMB Servers, Diagnostics Console, Add Connection.
-- Sheet modals for add/edit, discovery, and diagnostics operations.
+- Filter bar with search field, status picker, and sort picker.
+- Sheet modals for add/edit, discovery, diagnostics, and connection details.
 - Selecting a host from the discovery panel opens the add-connection form pre-filled with the host address.
 - Swipe-to-delete with Keychain cleanup.
-- Empty state display when no connections exist.
-- Minimum window size: 500×300.
+- Empty state display when no connections match the current filter.
+- Minimum window size: 860×520.
+- Bottom status bar with author link, connection summary, and build revision.
 
 ### ConnectionRow
 
 **File:** `SMBMountManager/Views/ConnectionRow.swift`
 
-A stateless row component receiving its data and callbacks via properties.
+A row component displaying a single connection's state, telemetry badges, and actions.
 
-**Inputs:** `connection`, `status`, `onConnect` closure, `onDisconnect` closure.
+**Inputs:** `connection`, `status`, `runtimeDetails`, `onConnect`, `onDisconnect`, `onRunBenchmark`, `onRefreshDetails`, `onOpenMountPoint`, `onCopyURL`.
 
 **Renders:**
 
-- Color-coded status circle (10pt).
-- Connection name (falls back to share name if name is empty).
-- Server address and share name as caption.
-- Auto-connect badge icon when enabled.
-- Context-aware button: "Connect", "Disconnect", "Retry", or "Connecting..." (disabled).
+- **Status indicator** (`StatusIndicator`) — a 10pt circle that animates between green and yellow (0.4s period) when connecting; otherwise shows the static status color.
+- **Connection name** (falls back to share name if name is empty).
+- **Badges** — capsule-shaped inline labels: "Hidden" (if share ends with `$`), protocol version (if available), "Unstable" (if stability grade is `.low`), "High Latency" (if probe latency ≥ 1 second).
+- **Server path** as caption (e.g., `192.168.1.10/share`).
+- **Telemetry line** — stability grade, probe latency, and success rate in a compact format.
+- **Error message** — shown in orange when the status is `.error`.
+- **Auto-connect badge** icon when enabled.
+- **Action button** — "Connect", "Disconnect", "Retry", or disabled during connecting. Uses `lastStableStatus` to avoid button label flickering during brief `.connecting` transitions.
+
+**Context menu:**
+
+- Copy SMB URL
+- Open Mount Point (disabled when not connected)
+- Refresh Details
+- Run Benchmark (disabled when not connected or already running)
 
 ### ConnectionEditView
 
@@ -272,12 +499,12 @@ A modal form for creating or editing a connection.
 
 A modal panel that displays SMB servers discovered on the local network via Bonjour.
 
-**Inputs:** `discoveryService` (`SMBDiscoveryService`), `onSelectHost` closure.
+**Inputs:** `discoveryService` (`SMBDiscoveryService`), `configuredHosts` (set of already-configured server addresses), `onSelectHost` closure.
 
 **Behavior:**
 
 - Starts browsing automatically on appear, stops on disappear.
-- Displays each host with its display name and normalized hostname.
+- Displays each host with its display name, normalized hostname, IP addresses, and port.
 - A **Use** button triggers the `onSelectHost` callback and dismisses the panel.
 - **Refresh** restarts the scan. A progress indicator is shown while scanning.
 - Empty state differentiates between "searching" and "no servers found".
@@ -287,22 +514,35 @@ A modal panel that displays SMB servers discovered on the local network via Bonj
 
 **File:** `SMBMountManager/Views/DiagnosticsConsoleView.swift`
 
-A modal log viewer displaying entries from `LoggingService`.
+A modal diagnostics panel with two tabs and a settings panel.
 
-**Controls:**
+**Inputs:** `loggingService` (`LoggingService`), `mountService` (`MountService`), `connections` (`[SMBConnection]`).
 
-- Segmented picker for `LogVisibilityMode` (Hidden / Errors Only / Standard / All).
-- **Copy Logs** — copies all entries to the system pasteboard in ISO 8601 format.
-- **Clear** — removes all recorded entries.
+**Tab layout:**
+
+- **Logs tab** — segmented picker for `LogVisibilityMode` (Hidden / Errors Only / Standard / All). Displays log entries sorted newest-first with severity (color-coded), category, timestamp, and message in monospaced font. Text selection enabled.
+- **Health tab** — `HSplitView` with connection health snapshots on the left (display name, server path, status/stability/confidence labels) and per-connection runtime details on the right (GroupBox per connection with status, success rate, probe history, error breakdown, latest error category, and up to 5 most recent timeline events).
+
+**Settings panel:**
+
+| Control | Type | Range |
+|---------|------|-------|
+| Automatic Retry Limit | Stepper | 1–20 attempts |
+| Probe Interval | Slider | 10–120 seconds |
+| Session Refresh Interval | Slider | 30–300 seconds |
+| Stability Observation Window | Picker | Session / 24 Hours / 7 Days |
+| Benchmark Payload Size | Stepper | 1–64 MB |
+| Connect on Launch | Toggle | — |
+| Disconnect on Quit | Toggle | — |
+
+**Actions:**
+
+- **Copy Logs** — copies all log entries to the clipboard (Logs tab).
+- **Copy Health JSON** — exports health snapshots as JSON (Health tab).
+- **Clear** — removes all recorded log entries (Logs tab only).
 - Esc to close.
 
-**Display:**
-
-- Each entry shows severity (color-coded), category, timestamp, and message in a monospaced font.
-- Entries are sorted newest-first.
-- Text selection is enabled for individual log messages.
-- Empty state varies by visibility mode.
-- Minimum size: 760×420.
+**Minimum size:** 900×560.
 
 ## Data Flow
 
@@ -315,11 +555,50 @@ ContentView calls MountService method or updates connections array
     ▼
 MountService updates statuses dictionary (@Published)
     │
-    ▼
-SwiftUI observes change, re-renders affected views
+    ├──▶ SwiftUI observes change, re-renders affected views
     │
     ▼
 ContentView calls saveAndRefresh() → PersistenceService.save() + MountService.updateConnections()
+```
+
+**Telemetry data flow:**
+
+```
+Status change (mount success/failure, disconnect)
+    │
+    ▼
+MountService updates internal telemetry tracking
+    │
+    ▼
+MountService publishes updated runtimeDetails (@Published)
+    │
+    ▼
+PersistenceService.saveRuntimeDetails() writes to runtime-details.json
+    │
+    ▼
+SwiftUI re-renders ConnectionRow badges, details sheet, health view
+```
+
+**Probe and session refresh flow:**
+
+```
+Status timer fires (every 15s) → refreshAllStatuses()
+    │
+    ├──▶ For each connected share: runPassiveProbeIfNeeded() → directory listing latency
+    │
+    └──▶ For each connected share: refreshSessionDetailsIfNeeded() → smbutil statshares/multichannel
+```
+
+**Benchmark flow:**
+
+```
+User triggers "Run Benchmark" (context menu or details sheet)
+    │
+    ▼
+MountService.runBenchmark(for:) → write temp file → read temp file → measure durations
+    │
+    ▼
+Update runtimeDetails with SMBBenchmarkResult → persist → re-render UI
 ```
 
 ## Entitlements and Info.plist
@@ -330,7 +609,7 @@ ContentView calls saveAndRefresh() → PersistenceService.save() + MountService.
 |-------------|-------|---------|
 | `com.apple.security.network.client` | `true` | Required for outbound network access to open SMB URLs |
 
-The App Sandbox is **disabled** — this is necessary because mounting SMB shares requires direct filesystem and process access (`statfs`, `umount`, `diskutil`, `smbutil`) that sandboxed apps cannot perform.
+The App Sandbox is **disabled** — this is necessary because mounting SMB shares requires direct filesystem and process access (`statfs`, `umount`, `diskutil`, `smbutil`, `/sbin/mount`) that sandboxed apps cannot perform.
 
 **File:** `SMBMountManager/SMBMountManager/Info.plist`
 
@@ -341,20 +620,30 @@ The App Sandbox is **disabled** — this is necessary because mounting SMB share
 
 ## Design Decisions and Constraints
 
-1. **Mount point is derived from share name** (`/Volumes/{shareName}`). Two connections with the same share name on different servers would target the same mount point and conflict.
+1. **Mount point is derived from server and share name** (`~/Volumes/{sanitizedServer}-{sanitizedShare}`), placed in the user's home directory rather than `/Volumes`. This avoids conflicts between connections with the same share name on different servers and does not require admin privileges.
 
-2. **`NSWorkspace.shared.open(url)`** delegates the actual SMB mount to macOS/Finder. This provides a reliable, OS-native mount experience but means the app does not have fine-grained control over mount options (e.g., read-only, soft/hard mount).
+2. **`/sbin/mount -t smbfs`** is used directly with `-o nobrowse,nopassprompt` options. This provides deterministic mount points, eliminates Finder involvement, and gives fine-grained control over mount options compared to the previous `NSWorkspace.shared.open(url)` approach.
 
-3. **Polling up to 15 seconds after mount** (one check per second) before declaring a timeout. Slow networks or servers may still need longer for the mount to appear.
+3. **Polling up to 15 seconds after mount** (one check per second) before declaring a timeout. On successful mount completion, a **3-second post-mount verification** is scheduled to catch transient mount appearances. Slow networks or servers may still need longer for the mount to appear.
 
-4. **Credentials in the SMB URL** are percent-encoded and passed inline (`smb://user:pass@server/share`). This is the standard approach for `NSWorkspace` SMB mounting. The URL exists briefly in memory but is not persisted.
+4. **Credentials in the SMB URL** are percent-encoded and passed inline (`//user:pass@server/share`) as arguments to `/sbin/mount`. The credentials exist briefly in memory and in the process argument list but are not persisted.
 
 5. **Polling-based monitoring** (15s status, 30s auto-connect) rather than filesystem event notifications. This is simpler and sufficient for the use case, though it means status updates are not instantaneous.
 
-6. **No App Sandbox** is a deliberate choice to allow process execution (`umount`, `diskutil`, `smbutil`) and `statfs()` system calls needed for mount and discovery management.
+6. **No App Sandbox** is a deliberate choice to allow process execution (`mount`, `umount`, `diskutil`, `smbutil`) and `statfs()` system calls needed for mount and discovery management.
 
 7. **Bonjour discovery** relies on servers publishing `_smb._tcp` services. Servers that do not advertise via mDNS will not appear in the discovery panel but can still be added manually.
 
 8. **Share discovery via `smbutil view`** requires valid credentials. The command is executed as a child process; credentials are percent-encoded and passed inline. The process output is parsed heuristically, filtering out header rows.
 
 9. **In-memory logging** with a 500-entry cap keeps memory usage bounded. Logs are also written to `OSLog` for inspection via Console.app. The visibility mode is persisted in `UserDefaults` so it survives app restarts.
+
+10. **Runtime details persistence** — telemetry and health data are persisted to `runtime-details.json` separately from connection metadata, using ISO 8601 date encoding. This allows runtime data to survive app restarts while keeping the connection file clean and human-readable.
+
+11. **Flicker prevention** — a connected status requires 2 consecutive missed checks (`missedCheckThreshold`) before downgrading to disconnected, preventing UI jitter from transient filesystem enumeration gaps during the 15-second polling cycle.
+
+12. **Mount request serialization** — only one mount operation runs at a time; additional requests are queued in `pendingMountRequests` and processed in order. This avoids overwhelming the system or network with concurrent mount attempts.
+
+13. **Passive probing** — probe latency is measured by listing the mounted volume's directory contents rather than sending network-level pings. This measures the actual I/O path the user experiences, including filesystem and protocol overhead.
+
+14. **Session detail collection** — protocol version, signing state, encryption state, and multichannel state are collected via `smbutil statshares -j` and `smbutil multichannel -j` in JSON output mode. This avoids private APIs and leverages built-in macOS tools.
