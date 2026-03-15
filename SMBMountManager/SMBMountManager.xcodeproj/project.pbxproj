@@ -146,8 +146,8 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 1500;
-				LastUpgradeCheck = 1500;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					AE000001 = {
 						CreatedOnToolsVersion = 15.0;
@@ -201,7 +201,7 @@
 			alwaysOutOfDate = 1;
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "source_plist=$SRCROOT/SMBMountManager/Info.plist\ncurrent_revision=$(/usr/libexec/PlistBuddy -c 'Print :AppRevision' \"$source_plist\" 2>/dev/null || echo '0')\nnext_revision=$((current_revision + 1))\n/usr/libexec/PlistBuddy -c \"Set :AppRevision ${next_revision}\" \"$source_plist\" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c \"Add :AppRevision string ${next_revision}\" \"$source_plist\" >/dev/null\nif [ -n \"$TARGET_BUILD_DIR\" ] && [ -n \"$INFOPLIST_PATH\" ] && [ -f \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" ]; then\n  /usr/libexec/PlistBuddy -c \"Set :AppRevision ${next_revision}\" \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c \"Add :AppRevision string ${next_revision}\" \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" >/dev/null\n  /usr/libexec/PlistBuddy -c \"Set :CFBundleVersion ${next_revision}\" \"$TARGET_BUILD_DIR/$INFOPLIST_PATH\" >/dev/null 2>&1 || true\nfi\necho \"Incremented app revision to ${next_revision}\"\n";
+			shellScript = "source_plist=\"$SRCROOT/SMBMountManager/Info.plist\"\nbuilt_plist=\"$TARGET_BUILD_DIR/$INFOPLIST_PATH\"\ncurrent_revision=$(/usr/libexec/PlistBuddy -c 'Print :AppRevision' \"$source_plist\" 2>/dev/null || echo '0')\nnext_revision=$((current_revision + 1))\n/usr/libexec/PlistBuddy -c \"Set :AppRevision ${next_revision}\" \"$source_plist\" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c \"Add :AppRevision string ${next_revision}\" \"$source_plist\" >/dev/null\nif [ -f \"$built_plist\" ]; then\n  /usr/libexec/PlistBuddy -c \"Set :AppRevision ${next_revision}\" \"$built_plist\" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c \"Add :AppRevision string ${next_revision}\" \"$built_plist\" >/dev/null\n  /usr/libexec/PlistBuddy -c \"Set :CFBundleVersion ${next_revision}\" \"$built_plist\" >/dev/null 2>&1 || true\nfi\necho \"Incremented app revision to ${next_revision}\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -370,6 +370,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.matteo.SMBMountManager;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -397,6 +398,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.matteo.SMBMountManager;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};

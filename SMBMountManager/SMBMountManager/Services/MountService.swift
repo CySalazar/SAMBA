@@ -10,6 +10,26 @@ final class MountService: ObservableObject {
             UserDefaults.standard.set(maximumAutomaticRetryCount, forKey: Self.maximumAutomaticRetryCountDefaultsKey)
         }
     }
+    @Published var probeIntervalSeconds: Double {
+        didSet {
+            UserDefaults.standard.set(probeIntervalSeconds, forKey: Self.probeIntervalDefaultsKey)
+        }
+    }
+    @Published var sessionRefreshIntervalSeconds: Double {
+        didSet {
+            UserDefaults.standard.set(sessionRefreshIntervalSeconds, forKey: Self.sessionRefreshIntervalDefaultsKey)
+        }
+    }
+    @Published var stabilityObservationWindow: StabilityObservationWindow {
+        didSet {
+            UserDefaults.standard.set(stabilityObservationWindow.rawValue, forKey: Self.stabilityObservationWindowDefaultsKey)
+        }
+    }
+    @Published var benchmarkPayloadSizeMB: Int {
+        didSet {
+            UserDefaults.standard.set(benchmarkPayloadSizeMB, forKey: Self.benchmarkPayloadSizeDefaultsKey)
+        }
+    }
 
     private var statusTimer: Timer?
     private var autoConnectTimer: Timer?
@@ -21,14 +41,28 @@ final class MountService: ObservableObject {
     private var telemetry: [UUID: ConnectionTelemetry] = [:]
     private let fileManager = FileManager.default
     private static let maximumAutomaticRetryCountDefaultsKey = "maximumAutomaticRetryCount"
+    private static let probeIntervalDefaultsKey = "probeIntervalSeconds"
+    private static let sessionRefreshIntervalDefaultsKey = "sessionRefreshIntervalSeconds"
+    private static let stabilityObservationWindowDefaultsKey = "stabilityObservationWindow"
+    private static let benchmarkPayloadSizeDefaultsKey = "benchmarkPayloadSizeMB"
 
     init() {
         let storedRetryCount = UserDefaults.standard.integer(forKey: Self.maximumAutomaticRetryCountDefaultsKey)
         maximumAutomaticRetryCount = storedRetryCount > 0 ? storedRetryCount : 5
+        let storedProbeInterval = UserDefaults.standard.double(forKey: Self.probeIntervalDefaultsKey)
+        probeIntervalSeconds = storedProbeInterval > 0 ? storedProbeInterval : 20
+        let storedRefreshInterval = UserDefaults.standard.double(forKey: Self.sessionRefreshIntervalDefaultsKey)
+        sessionRefreshIntervalSeconds = storedRefreshInterval > 0 ? storedRefreshInterval : 60
+        let storedWindow = UserDefaults.standard.string(forKey: Self.stabilityObservationWindowDefaultsKey)
+        stabilityObservationWindow = StabilityObservationWindow(rawValue: storedWindow ?? "") ?? .session
+        let storedBenchmarkSize = UserDefaults.standard.integer(forKey: Self.benchmarkPayloadSizeDefaultsKey)
+        benchmarkPayloadSizeMB = storedBenchmarkSize > 0 ? storedBenchmarkSize : 4
+        runtimeDetails = PersistenceService.loadRuntimeDetails()
     }
 
     func startMonitoring(connections: [SMBConnection]) {
         self.connections = connections
+        hydrateTelemetryFromPersistedRuntimeDetails(for: connections)
         LoggingService.shared.record(.info, category: .mount, message: "Starting monitoring for \(connections.count) connections")
         refreshAllStatuses()
 
@@ -57,6 +91,7 @@ final class MountService: ObservableObject {
 
     func updateConnections(_ connections: [SMBConnection]) {
         self.connections = connections
+        hydrateTelemetryFromPersistedRuntimeDetails(for: connections)
         pendingMountRequests.removeAll { request in
             !connections.contains(where: { $0.id == request.connectionID })
         }
@@ -77,6 +112,7 @@ final class MountService: ObservableObject {
             self.activeMountRequest = nil
         }
         LoggingService.shared.record(.debug, category: .mount, message: "Updated monitored connections to \(connections.count)")
+        PersistenceService.saveRuntimeDetails(runtimeDetails)
         refreshAllStatuses()
         processNextMountIfNeeded()
     }
@@ -440,16 +476,22 @@ final class MountService: ObservableObject {
         guard let mountedVolumeURL = mountedVolumeURL(for: connection) else {
             updateTelemetry(for: connection.id) { telemetry in
                 telemetry.benchmarkStatusMessage = "Benchmark unavailable because the share is not mounted."
+                telemetry.recordError(category: .benchmark, message: "Benchmark requested while share was not mounted.")
             }
+            return
+        }
+
+        guard runtimeDetails[connection.id]?.isBenchmarkRunning != true else {
             return
         }
 
         updateTelemetry(for: connection.id) { telemetry in
             telemetry.isBenchmarkRunning = true
             telemetry.benchmarkStatusMessage = "Running a small manual benchmark."
+            telemetry.recordTimeline(kind: .benchmark, title: "Manual benchmark started", details: connection.smbURL)
         }
 
-        let payloadSizeBytes = 4 * 1_048_576
+        let payloadSizeBytes = max(1, benchmarkPayloadSizeMB) * 1_048_576
         let benchmarkFileURL = mountedVolumeURL.appendingPathComponent(".smbmountmanager-benchmark.tmp")
         let payload = Data(repeating: 0x5A, count: payloadSizeBytes)
 
@@ -473,12 +515,18 @@ final class MountService: ObservableObject {
                 telemetry.isBenchmarkRunning = false
                 telemetry.benchmarkResult = result
                 telemetry.benchmarkStatusMessage = "Manual benchmark completed successfully."
+                telemetry.recordTimeline(
+                    kind: .benchmark,
+                    title: "Manual benchmark completed",
+                    details: "Write \(String(format: "%.2f", result.writeThroughputMBps)) MB/s • Read \(String(format: "%.2f", result.readThroughputMBps)) MB/s"
+                )
             }
         } catch {
             try? fileManager.removeItem(at: benchmarkFileURL)
             updateTelemetry(for: connection.id) { telemetry in
                 telemetry.isBenchmarkRunning = false
                 telemetry.benchmarkStatusMessage = "Benchmark failed: \(error.localizedDescription)"
+                telemetry.recordError(category: .benchmark, message: error.localizedDescription)
             }
             LoggingService.shared.record(.warning, category: .mount, message: "Benchmark failed for \(connection.serverAddress)/\(connection.shareName): \(error.localizedDescription)")
         }
@@ -496,7 +544,11 @@ final class MountService: ObservableObject {
             }
 
             if let lastProbeAt = telemetry.lastProbeAt,
-               Date().timeIntervalSince(lastProbeAt) < 20 {
+               Date().timeIntervalSince(lastProbeAt) < probeIntervalSeconds {
+                return
+            }
+
+            if case .error = statuses[connection.id] {
                 return
             }
         }
@@ -523,6 +575,7 @@ final class MountService: ObservableObject {
                     self.updateTelemetry(for: connection.id) { telemetry in
                         telemetry.recordProbeLatency(latency)
                         telemetry.isProbing = false
+                        telemetry.recordTimeline(kind: .probe, title: "Passive probe", details: "Latency \(Self.formatDuration(latency))")
                     }
                 }
             } catch {
@@ -548,7 +601,7 @@ final class MountService: ObservableObject {
             }
 
             if let lastSessionRefreshAt = telemetry.lastSessionRefreshAt,
-               Date().timeIntervalSince(lastSessionRefreshAt) < 60 {
+               Date().timeIntervalSince(lastSessionRefreshAt) < sessionRefreshIntervalSeconds {
                 return
             }
         }
@@ -570,9 +623,56 @@ final class MountService: ObservableObject {
                     telemetry.isRefreshingSessionDetails = false
                     telemetry.applySessionAttributes(sessionAttributes)
                     telemetry.applyMultichannelAttributes(multichannelAttributes)
+                    telemetry.applyVolumeDetails(self.volumeDetails(for: mountedVolumeURL))
+                    telemetry.recordTimeline(kind: .session, title: "Session details refreshed", details: connection.smbURL)
                 }
             }
         }
+    }
+
+    func refreshRuntimeDetails(for connection: SMBConnection) {
+        refreshSessionDetailsIfNeeded(for: connection, force: true)
+        runPassiveProbeIfNeeded(for: connection, force: true)
+    }
+
+    func healthSnapshots(for connections: [SMBConnection]) -> [ConnectionHealthSnapshot] {
+        connections.map { connection in
+            let details = runtimeDetails[connection.id] ?? SMBConnectionRuntimeDetails()
+            let status = statuses[connection.id] ?? .disconnected
+
+            return ConnectionHealthSnapshot(
+                id: connection.id,
+                displayName: connection.name.isEmpty ? connection.shareName : connection.name,
+                serverAddress: connection.serverAddress,
+                shareName: connection.shareName,
+                statusLabel: status.label,
+                stabilityLabel: details.stabilityGrade.title,
+                confidenceLabel: details.confidenceLevel.title,
+                successRate: details.successRate,
+                lastProbeLatency: details.lastProbeLatency,
+                topErrorCategory: topErrorCategory(from: details)
+            )
+        }
+    }
+
+    func exportHealthJSON(for connections: [SMBConnection]) -> String {
+        let payload = connections.map { connection in
+            HealthExportRecord(
+                connection: connection,
+                status: statuses[connection.id] ?? .disconnected,
+                details: runtimeDetails[connection.id] ?? SMBConnectionRuntimeDetails()
+            )
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        guard let data = try? encoder.encode(payload), let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+
+        return text
     }
 
     nonisolated private static func loadSessionAttributes(forMountPath mountPath: String) -> [String: String] {
@@ -795,23 +895,101 @@ final class MountService: ObservableObject {
         return telemetry
     }
 
+    private func hydrateTelemetryFromPersistedRuntimeDetails(for connections: [SMBConnection]) {
+        for connection in connections {
+            guard telemetry[connection.id] == nil, let details = runtimeDetails[connection.id] else {
+                continue
+            }
+
+            telemetry[connection.id] = ConnectionTelemetry(details: details)
+        }
+    }
+
     private func updateTelemetry(for connectionID: UUID, mutate: (ConnectionTelemetry) -> Void) {
         let telemetry = telemetry(for: connectionID)
         mutate(telemetry)
         runtimeDetails[connectionID] = telemetry.snapshot()
+        PersistenceService.saveRuntimeDetails(runtimeDetails)
     }
 
     private func updateTelemetryStatus(for connectionID: UUID, oldStatus: ConnectionStatus?, newStatus: ConnectionStatus) {
         updateTelemetry(for: connectionID) { telemetry in
             telemetry.recordStatusTransition(from: oldStatus, to: newStatus)
             telemetry.automaticRetryCount = automaticRetryCounts[connectionID, default: telemetry.automaticRetryCount]
+            telemetry.recordTimeline(kind: .status, title: "Status changed", details: newStatus.label)
+            if case .error(let message) = newStatus {
+                telemetry.recordError(category: Self.classifyError(from: message), message: message)
+            }
         }
+    }
+
+    private static func classifyError(from message: String) -> ConnectionErrorCategory {
+        let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedMessage.contains("authentication") || normalizedMessage.contains("password") || normalizedMessage.contains("login") {
+            return .authentication
+        }
+        if normalizedMessage.contains("timed out") {
+            return .timeout
+        }
+        if normalizedMessage.contains("share not found") || normalizedMessage.contains("not found") {
+            return .shareNotFound
+        }
+        if normalizedMessage.contains("mount point") || normalizedMessage.contains("resource busy") {
+            return .mountPointBusy
+        }
+        if normalizedMessage.contains("server unreachable") || normalizedMessage.contains("host") || normalizedMessage.contains("network") || normalizedMessage.contains("route") {
+            return .connectivity
+        }
+        return .unknown
+    }
+
+    private func volumeDetails(for mountedVolumeURL: URL) -> (path: String, name: String?, total: Int64?, available: Int64?) {
+        let keys: Set<URLResourceKey> = [
+            .nameKey,
+            .volumeTotalCapacityKey,
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey
+        ]
+        let values = try? mountedVolumeURL.resourceValues(forKeys: keys)
+        let total = values?.volumeTotalCapacity.map(Int64.init)
+        let available = values?.volumeAvailableCapacity.map(Int64.init)
+            ?? values?.volumeAvailableCapacityForImportantUsage
+
+        return (mountedVolumeURL.path, values?.name, total, available)
+    }
+
+    private func topErrorCategory(from details: SMBConnectionRuntimeDetails) -> String {
+        guard let top = details.errorCounts.max(by: { $0.value < $1.value }) else {
+            return "None"
+        }
+
+        return ConnectionErrorCategory(rawValue: top.key)?.title ?? top.key.capitalized
+    }
+
+    nonisolated private static func formatDuration(_ duration: TimeInterval) -> String {
+        if duration < 1 {
+            return "\(Int((duration * 1000).rounded())) ms"
+        }
+
+        return String(format: "%.2f s", duration)
     }
 }
 
 private struct MountRequest {
     let connectionID: UUID
     let initiatedByUser: Bool
+}
+
+private struct HealthExportRecord: Codable {
+    let connection: SMBConnection
+    let status: String
+    let details: SMBConnectionRuntimeDetails
+
+    init(connection: SMBConnection, status: ConnectionStatus, details: SMBConnectionRuntimeDetails) {
+        self.connection = connection
+        self.status = status.label
+        self.details = details
+    }
 }
 
 private final class ConnectionTelemetry {
@@ -838,6 +1016,42 @@ private final class ConnectionTelemetry {
     var lastProbeAt: Date?
     var isRefreshingSessionDetails = false
     var lastSessionRefreshAt: Date?
+    var mountedVolumePath: String?
+    var volumeName: String?
+    var volumeTotalCapacityBytes: Int64?
+    var volumeAvailableCapacityBytes: Int64?
+    var errorCounts: [String: Int] = [:]
+    var lastErrorCategory: ConnectionErrorCategory?
+    var timeline: [ConnectionTimelineEvent] = []
+
+    init() {}
+
+    convenience init(details: SMBConnectionRuntimeDetails) {
+        self.init()
+        lastMountDuration = details.lastMountDuration
+        probeLatencies = details.recentProbeLatencies
+        successfulMounts = details.successfulMounts
+        failedMounts = details.failedMounts
+        disconnectCount = details.disconnectCount
+        automaticRetryCount = details.automaticRetryCount
+        totalConnectedDuration = details.totalConnectedDuration
+        totalDisconnectedDuration = details.totalDisconnectedDuration
+        mountedVolumePath = details.mountedVolumePath
+        volumeName = details.volumeName
+        volumeTotalCapacityBytes = details.volumeTotalCapacityBytes
+        volumeAvailableCapacityBytes = details.volumeAvailableCapacityBytes
+        protocolVersion = details.protocolVersion
+        signingState = details.signingState
+        encryptionState = details.encryptionState
+        multichannelState = details.multichannelState
+        sessionAttributes = details.sessionAttributes
+        errorCounts = details.errorCounts
+        lastErrorCategory = details.lastErrorCategory
+        timeline = details.timeline
+        benchmarkResult = details.benchmarkResult
+        benchmarkStatusMessage = details.benchmarkStatusMessage
+        isBenchmarkRunning = details.isBenchmarkRunning
+    }
 
     func recordStatusTransition(from oldStatus: ConnectionStatus?, to newStatus: ConnectionStatus) {
         let now = Date()
@@ -871,6 +1085,26 @@ private final class ConnectionTelemetry {
         probeLatencies.append(latency)
         if probeLatencies.count > 12 {
             probeLatencies.removeFirst(probeLatencies.count - 12)
+        }
+    }
+
+    func applyVolumeDetails(_ volumeDetails: (path: String, name: String?, total: Int64?, available: Int64?)) {
+        mountedVolumePath = volumeDetails.path
+        volumeName = volumeDetails.name
+        volumeTotalCapacityBytes = volumeDetails.total
+        volumeAvailableCapacityBytes = volumeDetails.available
+    }
+
+    func recordError(category: ConnectionErrorCategory, message: String) {
+        errorCounts[category.rawValue, default: 0] += 1
+        lastErrorCategory = category
+        recordTimeline(kind: .note, title: "\(category.title) issue", details: message)
+    }
+
+    func recordTimeline(kind: ConnectionTimelineEventKind, title: String, details: String) {
+        timeline.append(ConnectionTimelineEvent(kind: kind, title: title, details: details))
+        if timeline.count > 30 {
+            timeline.removeFirst(timeline.count - 30)
         }
     }
 
@@ -909,21 +1143,30 @@ private final class ConnectionTelemetry {
         let attemptCount = successfulMounts + failedMounts
 
         return SMBConnectionRuntimeDetails(
+            lastUpdatedAt: Date(),
             lastMountDuration: lastMountDuration,
             lastProbeLatency: lastProbeLatency,
             averageProbeLatency: averageProbeLatency,
             probeLatencyJitter: probeLatencyJitter,
+            recentProbeLatencies: probeLatencies,
             successfulMounts: successfulMounts,
             failedMounts: failedMounts,
             disconnectCount: disconnectCount,
             automaticRetryCount: automaticRetryCount,
             totalConnectedDuration: totalConnectedDuration,
             totalDisconnectedDuration: totalDisconnectedDuration,
+            mountedVolumePath: mountedVolumePath,
+            volumeName: volumeName,
+            volumeTotalCapacityBytes: volumeTotalCapacityBytes,
+            volumeAvailableCapacityBytes: volumeAvailableCapacityBytes,
             protocolVersion: protocolVersion,
             signingState: signingState,
             encryptionState: encryptionState,
             multichannelState: multichannelState,
             sessionAttributes: sessionAttributes,
+            errorCounts: errorCounts,
+            lastErrorCategory: lastErrorCategory,
+            timeline: timeline,
             benchmarkResult: benchmarkResult,
             benchmarkStatusMessage: benchmarkStatusMessage,
             isBenchmarkRunning: isBenchmarkRunning,

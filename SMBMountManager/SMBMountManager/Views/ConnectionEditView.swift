@@ -29,6 +29,12 @@ struct ConnectionEditView: View {
                 SecureField("Password", text: $password)
                 Toggle("Auto-connect", isOn: $autoConnect)
 
+                if let validationMessage {
+                    Text(validationMessage)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
                 Section("Share Discovery") {
                     HStack {
                         Button(isDiscoveringShares ? "Discovering…" : "Discover Shares") {
@@ -171,16 +177,34 @@ struct ConnectionEditView: View {
     }
 
     private var isValid: Bool {
-        !serverAddress.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !shareName.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !username.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !password.trimmingCharacters(in: .whitespaces).isEmpty
+        validationMessage == nil
     }
 
     private var canDiscoverShares: Bool {
         !serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var validationMessage: String? {
+        let trimmedServer = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedShare = shareName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedServer.isEmpty || trimmedShare.isEmpty || trimmedUsername.isEmpty || trimmedPassword.isEmpty {
+            return "Server, share, username and password are required."
+        }
+        if trimmedServer.contains(" ") {
+            return "Server address should not contain spaces."
+        }
+        if trimmedShare.contains("/") || trimmedShare.contains(":") {
+            return "Share name should not contain `/` or `:`."
+        }
+        if trimmedUsername.contains(" ") {
+            return "Username should not contain spaces."
+        }
+        return nil
     }
 
     private func save() {

@@ -4,6 +4,9 @@ struct DiscoveredSMBHost: Identifiable, Hashable {
     let serviceName: String
     let hostName: String
     let port: Int
+    let ipAddresses: [String]
+    let lastResolvedAt: Date
+    let resolveDuration: TimeInterval?
 
     var id: String {
         "\(serviceName)|\(hostName)|\(port)"
@@ -16,6 +19,11 @@ struct DiscoveredSMBHost: Identifiable, Hashable {
     var normalizedHostName: String {
         hostName.trimmingCharacters(in: CharacterSet(charactersIn: "."))
     }
+
+    var secondaryDetails: String {
+        let addresses = ipAddresses.isEmpty ? "No IP yet" : ipAddresses.joined(separator: ", ")
+        return "\(addresses) • Port \(port)"
+    }
 }
 
 @MainActor
@@ -26,6 +34,7 @@ final class SMBDiscoveryService: NSObject, ObservableObject {
 
     private let browser = NetServiceBrowser()
     private var resolvingServices: [String: NetService] = [:]
+    private var resolveStartedAt: [String: Date] = [:]
 
     override init() {
         super.init()
@@ -34,7 +43,6 @@ final class SMBDiscoveryService: NSObject, ObservableObject {
 
     func startBrowsing() {
         stopBrowsing()
-        hosts = []
         errorMessage = nil
         isBrowsing = true
         LoggingService.shared.record(.info, category: .discovery, message: "Starting Bonjour discovery for SMB services")
@@ -48,6 +56,7 @@ final class SMBDiscoveryService: NSObject, ObservableObject {
         browser.stop()
         resolvingServices.values.forEach { $0.stop() }
         resolvingServices.removeAll()
+        resolveStartedAt.removeAll()
         isBrowsing = false
     }
 
@@ -60,7 +69,10 @@ final class SMBDiscoveryService: NSObject, ObservableObject {
         let discoveredHost = DiscoveredSMBHost(
             serviceName: service.name,
             hostName: hostName,
-            port: service.port
+            port: service.port,
+            ipAddresses: resolvedIPAddresses(for: service),
+            lastResolvedAt: Date(),
+            resolveDuration: resolveDuration(for: service.name)
         )
 
         if let existingIndex = hosts.firstIndex(where: { $0.id == discoveredHost.id }) {
@@ -84,6 +96,7 @@ extension SMBDiscoveryService: NetServiceBrowserDelegate {
     nonisolated func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         Task { @MainActor in
             self.resolvingServices[service.name] = service
+            self.resolveStartedAt[service.name] = Date()
             service.delegate = self
             service.resolve(withTimeout: 5)
         }
@@ -106,7 +119,7 @@ extension SMBDiscoveryService: NetServiceBrowserDelegate {
     nonisolated func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
         Task { @MainActor in
             self.resolvingServices.removeValue(forKey: service.name)
-            self.hosts.removeAll { $0.serviceName == service.name }
+            self.resolveStartedAt.removeValue(forKey: service.name)
         }
     }
 }
@@ -116,13 +129,60 @@ extension SMBDiscoveryService: NetServiceDelegate {
         Task { @MainActor in
             self.updateHost(from: sender)
             self.resolvingServices.removeValue(forKey: sender.name)
+            self.resolveStartedAt.removeValue(forKey: sender.name)
         }
     }
 
     nonisolated func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         Task { @MainActor in
             self.resolvingServices.removeValue(forKey: sender.name)
+            self.resolveStartedAt.removeValue(forKey: sender.name)
             LoggingService.shared.record(.warning, category: .discovery, message: "Failed to resolve SMB service \(sender.name): \(errorDict)")
         }
+    }
+}
+
+private extension SMBDiscoveryService {
+    func resolveDuration(for serviceName: String) -> TimeInterval? {
+        guard let startedAt = resolveStartedAt[serviceName] else {
+            return nil
+        }
+
+        return Date().timeIntervalSince(startedAt)
+    }
+
+    func resolvedIPAddresses(for service: NetService) -> [String] {
+        guard let addresses = service.addresses else {
+            return []
+        }
+
+        let hostAddresses = addresses.compactMap { data -> String? in
+            data.withUnsafeBytes { rawBufferPointer in
+                guard let baseAddress = rawBufferPointer.baseAddress else {
+                    return nil
+                }
+
+                let sockaddrPointer = baseAddress.assumingMemoryBound(to: sockaddr.self)
+                var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+
+                let result = getnameinfo(
+                    sockaddrPointer,
+                    socklen_t(data.count),
+                    &hostBuffer,
+                    socklen_t(hostBuffer.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+
+                guard result == 0 else {
+                    return nil
+                }
+
+                return String(cString: hostBuffer)
+            }
+        }
+
+        return Array(Set(hostAddresses)).sorted()
     }
 }

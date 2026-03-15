@@ -1,6 +1,11 @@
 import Foundation
 
 struct PersistenceService {
+    struct PersistedConnectionState: Codable {
+        var connections: [SMBConnection]
+        var runtimeDetails: [UUID: SMBConnectionRuntimeDetails]
+    }
+
     private static var directoryURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("SMBMountManager", isDirectory: true)
@@ -8,6 +13,10 @@ struct PersistenceService {
 
     private static var fileURL: URL {
         directoryURL.appendingPathComponent("connections.json")
+    }
+
+    private static var runtimeDetailsURL: URL {
+        directoryURL.appendingPathComponent("runtime-details.json")
     }
 
     static func load() -> [SMBConnection] {
@@ -34,6 +43,37 @@ struct PersistenceService {
             LoggingService.shared.record(.info, category: .persistence, message: "Saved \(connections.count) connections")
         } catch {
             LoggingService.shared.record(.error, category: .persistence, message: "Failed to save connections: \(error.localizedDescription)")
+        }
+    }
+
+    static func loadRuntimeDetails() -> [UUID: SMBConnectionRuntimeDetails] {
+        guard FileManager.default.fileExists(atPath: runtimeDetailsURL.path) else {
+            return [:]
+        }
+
+        do {
+            let data = try Data(contentsOf: runtimeDetailsURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let details = try decoder.decode([UUID: SMBConnectionRuntimeDetails].self, from: data)
+            LoggingService.shared.record(.info, category: .persistence, message: "Loaded runtime details for \(details.count) connections")
+            return details
+        } catch {
+            LoggingService.shared.record(.warning, category: .persistence, message: "Failed to load runtime details: \(error.localizedDescription)")
+            return [:]
+        }
+    }
+
+    static func saveRuntimeDetails(_ runtimeDetails: [UUID: SMBConnectionRuntimeDetails]) {
+        do {
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(runtimeDetails)
+            try data.write(to: runtimeDetailsURL, options: .atomic)
+        } catch {
+            LoggingService.shared.record(.warning, category: .persistence, message: "Failed to save runtime details: \(error.localizedDescription)")
         }
     }
 }
