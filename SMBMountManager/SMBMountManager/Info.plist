@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>AppRevision</key>
-	<string>10</string>
+	<string>43</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleExecutable</key>

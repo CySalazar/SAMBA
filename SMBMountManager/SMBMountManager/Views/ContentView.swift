@@ -89,7 +89,7 @@ struct ContentView: View {
             }
             .sheet(isPresented: $isAddingNew) {
                 ConnectionEditView(existing: nil, suggestedHost: suggestedHost) { connection, password in
-                    KeychainService.savePassword(password, for: connection.id)
+                    KeychainService.savePassword(password, for: connection)
                     connections.append(connection)
                     saveAndRefresh()
                 }
@@ -107,9 +107,14 @@ struct ContentView: View {
             }
             .sheet(item: $editingConnection) { connection in
                 ConnectionEditView(existing: connection) { updated, password in
-                    KeychainService.savePassword(password, for: updated.id)
+                    let otherConnections = connections.filter { $0.id != connection.id }
+                    KeychainService.savePassword(password, for: updated)
                     if let idx = connections.firstIndex(where: { $0.id == updated.id }) {
                         connections[idx] = updated
+                    }
+                    if connection.serverAddress.caseInsensitiveCompare(updated.serverAddress) != .orderedSame ||
+                        connection.username.caseInsensitiveCompare(updated.username) != .orderedSame {
+                        KeychainService.deletePassword(for: connection, remainingConnections: otherConnections)
                     }
                     saveAndRefresh()
                 }
@@ -159,7 +164,11 @@ struct ContentView: View {
 
     private func deleteConnections(at offsets: IndexSet) {
         for index in offsets {
-            KeychainService.deletePassword(for: connections[index].id)
+            let connection = connections[index]
+            let remainingConnections = connections.enumerated().compactMap { offset, candidate in
+                offset == index ? nil : candidate
+            }
+            KeychainService.deletePassword(for: connection, remainingConnections: remainingConnections)
             LoggingService.shared.record(.info, category: .ui, message: "Deleted connection \(connections[index].serverAddress)/\(connections[index].shareName)")
         }
         connections.remove(atOffsets: offsets)

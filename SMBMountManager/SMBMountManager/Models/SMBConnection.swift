@@ -25,7 +25,19 @@ struct SMBConnection: Identifiable, Codable, Equatable {
     var autoConnect: Bool
 
     var mountPoint: String {
-        "/Volumes/\(shareName)"
+        let sanitizedServer = serverAddress
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let sanitizedShareName = shareName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let folderName = [sanitizedServer, sanitizedShareName]
+            .filter { $0.isEmpty == false }
+            .joined(separator: "-")
+
+        return "\(NSHomeDirectory())/Volumes/\(folderName.isEmpty ? id.uuidString : folderName)"
     }
 
     var smbURL: String {

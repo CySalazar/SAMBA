@@ -161,7 +161,7 @@ struct ConnectionEditView: View {
             _shareName = State(initialValue: conn.shareName)
             _username = State(initialValue: conn.username)
             _autoConnect = State(initialValue: conn.autoConnect)
-            _password = State(initialValue: KeychainService.loadPassword(for: conn.id) ?? "")
+            _password = State(initialValue: KeychainService.loadPassword(for: conn) ?? "")
         } else if let suggestedHost {
             _name = State(initialValue: suggestedHost.displayName)
             _serverAddress = State(initialValue: suggestedHost.normalizedHostName)

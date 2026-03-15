@@ -16,6 +16,7 @@ final class MountService: ObservableObject {
     private var pendingMountRequests: [MountRequest] = []
     private var activeMountRequest: MountRequest?
     private var automaticRetryCounts: [UUID: Int] = [:]
+    private var consecutiveMissedChecks: [UUID: Int] = [:]
     private let fileManager = FileManager.default
     private static let maximumAutomaticRetryCountDefaultsKey = "maximumAutomaticRetryCount"
 
@@ -60,6 +61,9 @@ final class MountService: ObservableObject {
         automaticRetryCounts = automaticRetryCounts.filter { connectionID, _ in
             connections.contains(where: { $0.id == connectionID })
         }
+        consecutiveMissedChecks = consecutiveMissedChecks.filter { connectionID, _ in
+            connections.contains(where: { $0.id == connectionID })
+        }
         if let activeMountRequest,
            !connections.contains(where: { $0.id == activeMountRequest.connectionID }) {
             self.activeMountRequest = nil
@@ -73,7 +77,7 @@ final class MountService: ObservableObject {
 
     func mount(_ connection: SMBConnection, initiatedByUser: Bool = true) {
         if isMounted(connection) {
-            statuses[connection.id] = .connected
+            setStatus(.connected, for: connection.id)
             LoggingService.shared.record(.debug, category: .mount, message: "Mount skipped for \(connection.serverAddress)/\(connection.shareName): already connected")
             automaticRetryCounts[connection.id] = 0
             return
@@ -82,7 +86,7 @@ final class MountService: ObservableObject {
         if initiatedByUser {
             automaticRetryCounts[connection.id] = 0
         } else if automaticRetryCounts[connection.id, default: 0] >= maximumAutomaticRetryCount {
-            statuses[connection.id] = .error("Automatic retry limit reached")
+            setStatus(.error("Automatic retry limit reached"), for: connection.id)
             LoggingService.shared.record(
                 .warning,
                 category: .mount,
@@ -111,53 +115,73 @@ final class MountService: ObservableObject {
             return
         }
 
-        statuses[connection.id] = .connecting
+        setStatus(.connecting, for: connection.id)
         pendingMountRequests.append(MountRequest(connectionID: connection.id, initiatedByUser: initiatedByUser))
         let origin = initiatedByUser ? "user" : "automatic"
-        LoggingService.shared.record(.info, category: .mount, message: "Queued \(origin) mount for \(connection.serverAddress)/\(connection.shareName)")
+        LoggingService.shared.record(.info, category: .mount, message: "Queued \(origin) mount for \(connection.serverAddress)/\(connection.shareName) | pending=\(pendingMountRequests.count) active=\(activeMountRequest?.connectionID.uuidString ?? "none")")
         processNextMountIfNeeded()
     }
 
     private func startMount(_ connection: SMBConnection, initiatedByUser: Bool) {
-        guard let password = KeychainService.loadPassword(for: connection.id) else {
-            statuses[connection.id] = .error("No password in Keychain")
+        guard let password = KeychainService.loadPassword(for: connection) else {
+            setStatus(.error("Password missing in Keychain"), for: connection.id)
             LoggingService.shared.record(.error, category: .mount, message: "Mount aborted for \(connection.serverAddress)/\(connection.shareName): missing password")
             registerFailure(for: connection.id, initiatedByUser: initiatedByUser)
             finishMountAttempt(for: connection.id)
             return
         }
 
-        statuses[connection.id] = .connecting
-        LoggingService.shared.record(.info, category: .mount, message: "Mount requested for \(connection.serverAddress)/\(connection.shareName)")
+        setStatus(.connecting, for: connection.id)
+        LoggingService.shared.record(.info, category: .mount, message: "Starting silent mount for \(connection.serverAddress)/\(connection.shareName) | mountPoint=\(connection.mountPoint) initiatedByUser=\(initiatedByUser)")
 
-        // Percent-encode user and password for URL safety
-        let user = connection.username.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? connection.username
-        let pass = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? password
-
-        let urlString = "smb://\(user):\(pass)@\(connection.serverAddress)/\(connection.shareName)"
-        guard let url = URL(string: urlString) else {
-            statuses[connection.id] = .error("Invalid SMB URL")
-            LoggingService.shared.record(.error, category: .mount, message: "Invalid SMB URL for \(connection.serverAddress)/\(connection.shareName)")
+        let mountPointURL = URL(fileURLWithPath: connection.mountPoint, isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: mountPointURL, withIntermediateDirectories: true)
+        } catch {
+            setStatus(.error("Unable to prepare writable mount point"), for: connection.id)
+            LoggingService.shared.record(.error, category: .mount, message: "Failed to create mount point \(mountPointURL.path): \(error.localizedDescription)")
             registerFailure(for: connection.id, initiatedByUser: initiatedByUser)
             finishMountAttempt(for: connection.id)
             return
         }
 
-        NSWorkspace.shared.open(url)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/sbin/mount")
+        process.arguments = [
+            "-t", "smbfs",
+            "-o", "nobrowse,nopassprompt",
+            smbService(connection: connection, password: password),
+            mountPointURL.path
+        ]
+
+        LoggingService.shared.record(.debug, category: .mount, message: "Launching /sbin/mount for \(connection.serverAddress)/\(connection.shareName) | arguments=\(process.arguments?.joined(separator: " ") ?? "none")")
+
+        let standardError = Pipe()
+        process.standardError = standardError
+
+        do {
+            try process.run()
+        } catch {
+            setStatus(.error("Unable to start mount"), for: connection.id)
+            LoggingService.shared.record(.error, category: .mount, message: "Failed to launch silent mount for \(connection.serverAddress)/\(connection.shareName): \(error.localizedDescription)")
+            registerFailure(for: connection.id, initiatedByUser: initiatedByUser)
+            finishMountAttempt(for: connection.id)
+            return
+        }
 
         Task { [weak self] in
-            await self?.waitForMount(of: connection)
+            await self?.waitForMount(of: connection, process: process, errorPipe: standardError, initiatedByUser: initiatedByUser)
         }
     }
 
     // MARK: - Unmount
 
     func unmount(_ connection: SMBConnection) {
-        statuses[connection.id] = .connecting
+        setStatus(.connecting, for: connection.id)
         LoggingService.shared.record(.info, category: .mount, message: "Unmount requested for \(connection.serverAddress)/\(connection.shareName)")
 
         guard let mountedVolumeURL = mountedVolumeURL(for: connection) else {
-            statuses[connection.id] = .disconnected
+            setStatus(.disconnected, for: connection.id)
             LoggingService.shared.record(.warning, category: .mount, message: "Unmount skipped for \(connection.serverAddress)/\(connection.shareName): mount point not found")
             return
         }
@@ -171,7 +195,7 @@ final class MountService: ObservableObject {
             process.waitUntilExit()
 
             if process.terminationStatus == 0 {
-                statuses[connection.id] = .disconnected
+                setStatus(.disconnected, for: connection.id)
                 LoggingService.shared.record(.info, category: .mount, message: "Unmounted \(connection.serverAddress)/\(connection.shareName)")
             } else {
                 // Try with diskutil if umount fails
@@ -182,15 +206,15 @@ final class MountService: ObservableObject {
                 diskutil.waitUntilExit()
 
                 if diskutil.terminationStatus == 0 {
-                    statuses[connection.id] = .disconnected
+                    setStatus(.disconnected, for: connection.id)
                     LoggingService.shared.record(.info, category: .mount, message: "Unmounted \(connection.serverAddress)/\(connection.shareName) via diskutil fallback")
                 } else {
-                    statuses[connection.id] = .error("Unmount failed")
+                    setStatus(.error("Unmount failed"), for: connection.id)
                     LoggingService.shared.record(.error, category: .mount, message: "Unmount failed for \(connection.serverAddress)/\(connection.shareName)")
                 }
             }
         } catch {
-            statuses[connection.id] = .error(error.localizedDescription)
+            setStatus(.error(error.localizedDescription), for: connection.id)
             LoggingService.shared.record(.error, category: .mount, message: "Unmount error for \(connection.serverAddress)/\(connection.shareName): \(error.localizedDescription)")
         }
     }
@@ -203,11 +227,11 @@ final class MountService: ObservableObject {
 
     private func checkAndUpdateStatus(for connection: SMBConnection) {
         if isMounted(connection) {
-            statuses[connection.id] = .connected
+            setStatus(.connected, for: connection.id)
             LoggingService.shared.record(.info, category: .mount, message: "Connection marked connected for \(connection.serverAddress)/\(connection.shareName)")
             automaticRetryCounts[connection.id] = 0
         } else if statuses[connection.id] == .connecting {
-            statuses[connection.id] = .error("Mount did not appear")
+            setStatus(.error("Mount did not appear"), for: connection.id)
             LoggingService.shared.record(.error, category: .mount, message: "Mount timed out for \(connection.serverAddress)/\(connection.shareName)")
             registerFailure(for: connection.id, initiatedByUser: activeMountRequest?.initiatedByUser ?? false)
         }
@@ -215,29 +239,88 @@ final class MountService: ObservableObject {
         finishMountAttempt(for: connection.id)
     }
 
+    /// Number of consecutive refresh cycles where `isMounted` must return false
+    /// before a `.connected` status is downgraded to `.disconnected`.
+    /// This avoids flickering caused by transient filesystem enumeration gaps.
+    private static let missedCheckThreshold = 2
+
     private func refreshAllStatuses() {
         for connection in connections {
             let current = statuses[connection.id]
-            // Don't overwrite "connecting" status
-            if case .connecting = current { continue }
+            let mounted = isMounted(connection)
 
-            statuses[connection.id] = isMounted(connection) ? .connected : .disconnected
+            LoggingService.shared.record(.debug, category: .mount, message: "Refresh status for \(connection.serverAddress)/\(connection.shareName) | current=\(current?.label ?? "nil") mounted=\(mounted) active=\(activeMountRequest?.connectionID == connection.id) queued=\(pendingMountRequests.contains(where: { $0.connectionID == connection.id })) retries=\(automaticRetryCounts[connection.id, default: 0]) missedChecks=\(consecutiveMissedChecks[connection.id, default: 0])")
+
+            if mounted {
+                setStatus(.connected, for: connection.id)
+                automaticRetryCounts[connection.id] = 0
+                consecutiveMissedChecks[connection.id] = 0
+                continue
+            }
+
+            // Preserve .connecting while a mount attempt is pending
+            if case .connecting = current, isMountAttemptPending(for: connection.id) {
+                consecutiveMissedChecks[connection.id] = 0
+                continue
+            }
+
+            // Require multiple consecutive missed checks before downgrading
+            // from .connected, to avoid flickering on transient detection gaps.
+            if current == .connected {
+                let missedCount = (consecutiveMissedChecks[connection.id] ?? 0) + 1
+                consecutiveMissedChecks[connection.id] = missedCount
+                if missedCount < Self.missedCheckThreshold {
+                    continue
+                }
+            }
+
+            consecutiveMissedChecks[connection.id] = 0
+            setStatus(.disconnected, for: connection.id)
         }
     }
 
     private func autoReconnect() {
         for connection in connections where connection.autoConnect {
-            if statuses[connection.id] != .connected && statuses[connection.id] != .connecting {
-                mount(connection, initiatedByUser: false)
+            let current = statuses[connection.id]
+            // Skip if already connected, currently connecting, or a mount attempt is in flight
+            if current == .connected || current == .connecting {
+                continue
             }
+            if isMountAttemptPending(for: connection.id) {
+                continue
+            }
+            mount(connection, initiatedByUser: false)
         }
     }
 
-    private func waitForMount(of connection: SMBConnection) async {
-        for _ in 0..<15 {
+    private func waitForMount(of connection: SMBConnection, process: Process, errorPipe: Pipe, initiatedByUser: Bool) async {
+        for attempt in 1...15 {
             if isMounted(connection) {
-                statuses[connection.id] = .connected
-                LoggingService.shared.record(.debug, category: .mount, message: "Detected mounted SMB volume for \(connection.serverAddress)/\(connection.shareName)")
+                setStatus(.connected, for: connection.id)
+                LoggingService.shared.record(.debug, category: .mount, message: "Detected mounted SMB volume for \(connection.serverAddress)/\(connection.shareName) during wait loop | attempt=\(attempt)")
+                finishMountAttempt(for: connection.id)
+                return
+            }
+
+            LoggingService.shared.record(.debug, category: .mount, message: "Mount wait tick for \(connection.serverAddress)/\(connection.shareName) | attempt=\(attempt) processRunning=\(process.isRunning)")
+
+            if process.isRunning == false {
+                if process.terminationStatus == 0 {
+                    setStatus(.connected, for: connection.id)
+                    automaticRetryCounts[connection.id] = 0
+                    consecutiveMissedChecks[connection.id] = 0
+                    LoggingService.shared.record(.info, category: .mount, message: "Mount command completed successfully for \(connection.serverAddress)/\(connection.shareName) | exitCode=0")
+                    finishMountAttempt(for: connection.id)
+                    schedulePostMountVerification(for: connection)
+                    return
+                }
+
+                let errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let message = userFacingMountError(from: errorOutput, exitCode: process.terminationStatus)
+                setStatus(.error(message), for: connection.id)
+                LoggingService.shared.record(.error, category: .mount, message: "Silent mount failed for \(connection.serverAddress)/\(connection.shareName) | exitCode=\(process.terminationStatus) stderr=\(errorOutput ?? "none") mappedMessage=\(message)")
+                registerFailure(for: connection.id, initiatedByUser: initiatedByUser)
                 finishMountAttempt(for: connection.id)
                 return
             }
@@ -248,8 +331,82 @@ final class MountService: ObservableObject {
         checkAndUpdateStatus(for: connection)
     }
 
+    private func schedulePostMountVerification(for connection: SMBConnection) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self else {
+                return
+            }
+
+            LoggingService.shared.record(.debug, category: .mount, message: "Running post-mount verification for \(connection.serverAddress)/\(connection.shareName)")
+
+            if self.isMounted(connection) {
+                self.setStatus(.connected, for: connection.id)
+                LoggingService.shared.record(.info, category: .mount, message: "Post-mount verification confirmed \(connection.serverAddress)/\(connection.shareName)")
+            } else {
+                self.setStatus(.disconnected, for: connection.id)
+                LoggingService.shared.record(.warning, category: .mount, message: "Post-mount verification could not confirm \(connection.serverAddress)/\(connection.shareName) | expectedMountPoint=\(connection.mountPoint)")
+            }
+        }
+    }
+
+    private func smbService(connection: SMBConnection, password: String) -> String {
+        var components = URLComponents()
+        components.scheme = "smb"
+        components.user = connection.username
+        components.password = password
+        components.host = connection.serverAddress
+        components.percentEncodedPath = "/" + encodedSMBPathComponent(connection.shareName)
+
+        let smbURL = components.string ?? "smb://\(connection.serverAddress)/\(connection.shareName)"
+        if smbURL.hasPrefix("smb:") {
+            return String(smbURL.dropFirst(4))
+        }
+
+        return smbURL
+    }
+
+    private func encodedSMBPathComponent(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private func userFacingMountError(from rawError: String?, exitCode: Int32) -> String {
+        let normalizedError = rawError?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        if normalizedError.contains("authentication error") || normalizedError.contains("login failed") {
+            return "Authentication failed. Check username and password."
+        }
+
+        if normalizedError.contains("no route to host") ||
+            normalizedError.contains("host is down") ||
+            normalizedError.contains("could not connect") {
+            return "Server unreachable. Check address, VPN, or network."
+        }
+
+        if normalizedError.contains("operation timed out") || normalizedError.contains("timed out") {
+            return "Connection timed out."
+        }
+
+        if normalizedError.contains("no such file or directory") || normalizedError.contains("not found") {
+            return "Share not found on server."
+        }
+
+        if normalizedError.contains("resource busy") {
+            return "Mount point already in use."
+        }
+
+        if normalizedError.isEmpty == false {
+            return rawError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Mount failed."
+        }
+
+        return "Mount failed (exit code \(exitCode))."
+    }
+
     private func mountedVolumeURL(for connection: SMBConnection) -> URL? {
         if isSMBMount(atPath: connection.mountPoint) {
+            LoggingService.shared.record(.debug, category: .mount, message: "Mounted volume matched by mount point for \(connection.serverAddress)/\(connection.shareName) | path=\(connection.mountPoint)")
             return URL(fileURLWithPath: connection.mountPoint, isDirectory: true)
         }
 
@@ -257,12 +414,16 @@ final class MountService: ObservableObject {
 
         guard let volumeURLs = fileManager.mountedVolumeURLs(
             includingResourceValuesForKeys: resourceKeys,
-            options: [.skipHiddenVolumes]
+            options: []
         ) else {
             return nil
         }
 
-        return volumeURLs.first { matches(connection, mountedVolumeURL: $0) }
+        let matchedVolume = volumeURLs.first { matches(connection, mountedVolumeURL: $0) }
+        if let matchedVolume {
+            LoggingService.shared.record(.debug, category: .mount, message: "Mounted volume matched by remount URL for \(connection.serverAddress)/\(connection.shareName) | path=\(matchedVolume.path)")
+        }
+        return matchedVolume
     }
 
     private func matches(_ connection: SMBConnection, mountedVolumeURL: URL) -> Bool {
@@ -278,6 +439,7 @@ final class MountService: ObservableObject {
 
         if let remountURL = resourceValues.volumeURLForRemounting,
            connection.matchesRemote(server: remountURL.host(), share: remountURL.lastPathComponent) {
+            LoggingService.shared.record(.debug, category: .mount, message: "Remount URL match for \(connection.serverAddress)/\(connection.shareName) | candidatePath=\(mountedVolumeURL.path) remountURL=\(remountURL.absoluteString)")
             return true
         }
 
@@ -308,10 +470,19 @@ final class MountService: ObservableObject {
             pendingMountRequests.removeFirst()
 
             guard let connection = connections.first(where: { $0.id == nextMountRequest.connectionID }) else {
+                LoggingService.shared.record(.warning, category: .mount, message: "Dropped queued mount for missing connection id \(nextMountRequest.connectionID.uuidString)")
+                continue
+            }
+
+            if isMounted(connection) {
+                setStatus(.connected, for: connection.id)
+                automaticRetryCounts[connection.id] = 0
+                LoggingService.shared.record(.info, category: .mount, message: "Queued mount resolved immediately because share is already mounted for \(connection.serverAddress)/\(connection.shareName)")
                 continue
             }
 
             activeMountRequest = nextMountRequest
+            LoggingService.shared.record(.debug, category: .mount, message: "Dequeued mount request for \(connection.serverAddress)/\(connection.shareName) | initiatedByUser=\(nextMountRequest.initiatedByUser) remainingPending=\(pendingMountRequests.count)")
             startMount(connection, initiatedByUser: nextMountRequest.initiatedByUser)
             return
         }
@@ -319,9 +490,11 @@ final class MountService: ObservableObject {
 
     private func finishMountAttempt(for connectionID: UUID) {
         if activeMountRequest?.connectionID == connectionID {
+            LoggingService.shared.record(.debug, category: .mount, message: "Finishing active mount attempt for connection id \(connectionID.uuidString)")
             activeMountRequest = nil
             processNextMountIfNeeded()
         } else {
+            LoggingService.shared.record(.debug, category: .mount, message: "Removing stale queued mount attempts for connection id \(connectionID.uuidString)")
             pendingMountRequests.removeAll { $0.connectionID == connectionID }
         }
     }
@@ -349,6 +522,25 @@ final class MountService: ObservableObject {
                     message: "Automatic reconnect attempt \(newCount) of \(maximumAutomaticRetryCount) failed for \(connection.serverAddress)/\(connection.shareName)"
                 )
             }
+        }
+    }
+
+    private func isMountAttemptPending(for connectionID: UUID) -> Bool {
+        activeMountRequest?.connectionID == connectionID ||
+            pendingMountRequests.contains(where: { $0.connectionID == connectionID })
+    }
+
+    /// Sets the status for a connection only when the new value differs from
+    /// the current one, preventing unnecessary @Published change notifications
+    /// that would cause SwiftUI to re-render the row.
+    private func setStatus(_ newStatus: ConnectionStatus, for connectionID: UUID, caller: String = #function) {
+        let oldStatus = statuses[connectionID]
+        if oldStatus != newStatus {
+            let name = connections.first(where: { $0.id == connectionID })?.shareName ?? connectionID.uuidString
+            LoggingService.shared.record(.debug, category: .mount, message: "[\(caller)] Status change for \(name): \(oldStatus?.label ?? "nil") → \(newStatus.label)")
+            var updatedStatuses = statuses
+            updatedStatuses[connectionID] = newStatus
+            statuses = updatedStatuses
         }
     }
 }

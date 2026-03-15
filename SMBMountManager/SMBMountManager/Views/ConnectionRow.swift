@@ -5,22 +5,30 @@ struct ConnectionRow: View {
     let status: ConnectionStatus
     let onConnect: () -> Void
     let onDisconnect: () -> Void
+    /// Tracks the last non-connecting status so that the button label and
+    /// tint remain stable while the status oscillates through `.connecting`.
+    @State private var lastStableStatus: ConnectionStatus = .disconnected
 
     var body: some View {
         HStack(spacing: 12) {
             // Status indicator
-            Circle()
-                .fill(statusColor)
-                .frame(width: 10, height: 10)
+            StatusIndicator(status: status)
                 .help(statusTooltip)
 
             // Connection info
             VStack(alignment: .leading, spacing: 2) {
                 Text(connection.name.isEmpty ? connection.shareName : connection.name)
                     .font(.headline)
-                Text("\(connection.serverAddress)/\(connection.shareName)")
+                Text(connectionSubtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(secondaryTextColor)
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .help(errorMessage)
+                }
             }
 
             Spacer()
@@ -35,7 +43,7 @@ struct ConnectionRow: View {
 
             // Connect/Disconnect button
             Button(action: {
-                if status == .connected {
+                if lastStableStatus == .connected {
                     onDisconnect()
                 } else {
                     onConnect()
@@ -45,11 +53,21 @@ struct ConnectionRow: View {
                     .frame(width: 90)
             }
             .buttonStyle(.borderedProminent)
-            .tint(status == .connected ? .red : .accentColor)
+            .tint(lastStableStatus == .connected ? .red : .accentColor)
             .disabled(status == .connecting)
             .help(buttonTooltip)
         }
         .padding(.vertical, 4)
+        .onAppear {
+            if status != .connecting {
+                lastStableStatus = status
+            }
+        }
+        .onChange(of: status) { newStatus in
+            if newStatus != .connecting {
+                lastStableStatus = newStatus
+            }
+        }
     }
 
     private var statusColor: Color {
@@ -61,12 +79,28 @@ struct ConnectionRow: View {
         }
     }
 
+    private var connectionSubtitle: String {
+        return "\(connection.serverAddress)/\(connection.shareName)"
+    }
+
+    private var secondaryTextColor: Color {
+        return .secondary
+    }
+
+    private var errorMessage: String? {
+        if case .error(let message) = status {
+            return message
+        }
+
+        return nil
+    }
+
     private var buttonLabel: String {
-        switch status {
+        switch lastStableStatus {
         case .connected: return "Disconnect"
-        case .connecting: return "Connecting…"
         case .disconnected: return "Connect"
         case .error: return "Retry"
+        case .connecting: return "Connect"
         }
     }
 
@@ -75,7 +109,7 @@ struct ConnectionRow: View {
         case .connected:
             return "This SMB share is currently connected"
         case .connecting:
-            return "Connection in progress"
+            return "Connecting to the remote SMB share in the background"
         case .disconnected:
             return "This SMB share is currently disconnected"
         case .error(let message):
@@ -93,6 +127,36 @@ struct ConnectionRow: View {
             return "Connect this SMB share"
         case .error:
             return "Retry connecting this SMB share"
+        }
+    }
+}
+
+private struct StatusIndicator: View {
+    let status: ConnectionStatus
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.4)) { context in
+            Circle()
+                .fill(indicatorColor(at: context.date))
+                .frame(width: 10, height: 10)
+        }
+    }
+
+    private func indicatorColor(at date: Date) -> Color {
+        guard status == .connecting else {
+            return statusColor
+        }
+
+        let phase = Int(date.timeIntervalSinceReferenceDate / 0.4)
+        return phase.isMultiple(of: 2) ? .green : .yellow
+    }
+
+    private var statusColor: Color {
+        switch status {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .disconnected: return .red
+        case .error: return .orange
         }
     }
 }
