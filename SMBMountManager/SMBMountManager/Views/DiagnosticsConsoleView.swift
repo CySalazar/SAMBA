@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum DiagnosticsTab: String, CaseIterable, Identifiable {
     case logs
@@ -16,6 +17,7 @@ struct DiagnosticsConsoleView: View {
     @AppStorage("connectSharesOnLaunch") private var connectSharesOnLaunch = false
     @AppStorage("disconnectSharesOnQuit") private var disconnectSharesOnQuit = false
     @State private var selectedTab: DiagnosticsTab = .logs
+    @State private var exportMessage: String?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -47,6 +49,16 @@ struct DiagnosticsConsoleView: View {
                     Button("Copy Logs") {
                         copy(loggingService.exportText())
                     }
+
+                    Menu {
+                        ForEach(LogExportFormat.allCases) { format in
+                            Button("Export \(format.title)") {
+                                exportLogs(as: format)
+                            }
+                        }
+                    } label: {
+                        Text("Export Logs")
+                    }
                 } else {
                     Button("Copy Health JSON") {
                         copy(mountService.exportHealthJSON(for: connections))
@@ -68,6 +80,14 @@ struct DiagnosticsConsoleView: View {
         }
         .padding(20)
         .frame(minWidth: 900, minHeight: 560)
+        .alert("Export Logbook", isPresented: Binding(
+            get: { exportMessage != nil },
+            set: { if $0 == false { exportMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportMessage ?? "")
+        }
     }
 
     private var settingsPanel: some View {
@@ -290,6 +310,39 @@ struct DiagnosticsConsoleView: View {
     private func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func exportLogs(as format: LogExportFormat) {
+        let panel = NSSavePanel()
+        panel.title = "Export Logbook"
+        panel.nameFieldStringValue = "SMBMountManager-logbook.\(format.fileExtension)"
+        panel.allowedContentTypes = contentTypes(for: format)
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        let payload = LogExportFormatter.export(loggingService.entries, format: format)
+
+        do {
+            try payload.write(to: url, atomically: true, encoding: .utf8)
+            exportMessage = "Logbook exported as \(format.title)."
+        } catch {
+            exportMessage = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func contentTypes(for format: LogExportFormat) -> [UTType] {
+        switch format {
+        case .plainText:
+            return [.plainText]
+        case .json:
+            return [.json]
+        case .csv:
+            return [.commaSeparatedText]
+        case .markdown:
+            return [.plainText]
+        }
     }
 }
 

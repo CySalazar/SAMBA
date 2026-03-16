@@ -421,3 +421,65 @@ struct BackgroundRefreshPolicyTests {
         )
     }
 }
+
+struct LogExportFormatterTests {
+    @Test
+    func exportsPlainTextLogbook() {
+        let entries = sampleEntries()
+
+        let text = LogExportFormatter.export(entries, format: .plainText)
+
+        #expect(text.contains("[ERROR]"))
+        #expect(text.contains("[mount]"))
+        #expect(text.contains("Authentication failed"))
+    }
+
+    @Test
+    func exportsJSONLogbook() {
+        let entries = sampleEntries()
+
+        let json = LogExportFormatter.export(entries, format: .json)
+
+        #expect(json.contains("\"severity\" : \"error\""))
+        #expect(json.contains("\"category\" : \"mount\""))
+        #expect(json.contains("\"message\" : \"Authentication failed\""))
+    }
+
+    @Test
+    func exportsCSVLogbookWithEscapedFields() {
+        let entries = [
+            LogEntry(
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                severity: .warning,
+                category: .ui,
+                message: "Mount, retry required"
+            )
+        ]
+
+        let csv = LogExportFormatter.export(entries, format: .csv)
+
+        #expect(csv.contains("timestamp,severity,category,message"))
+        #expect(csv.contains("\"Mount, retry required\""))
+    }
+
+    @Test
+    func exportsMarkdownLogbook() {
+        let entries = sampleEntries()
+
+        let markdown = LogExportFormatter.export(entries, format: .markdown)
+
+        #expect(markdown.contains("| Timestamp | Severity | Category | Message |"))
+        #expect(markdown.contains("| error | mount | Authentication failed |"))
+    }
+
+    private func sampleEntries() -> [LogEntry] {
+        [
+            LogEntry(
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                severity: .error,
+                category: .mount,
+                message: "Authentication failed"
+            )
+        ]
+    }
+}

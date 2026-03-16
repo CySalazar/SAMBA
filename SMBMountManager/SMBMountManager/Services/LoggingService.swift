@@ -45,6 +45,127 @@ struct LogEntry: Identifiable {
     let message: String
 }
 
+enum LogExportFormat: String, CaseIterable, Identifiable {
+    case plainText
+    case json
+    case csv
+    case markdown
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .plainText:
+            return "Plain Text"
+        case .json:
+            return "JSON"
+        case .csv:
+            return "CSV"
+        case .markdown:
+            return "Markdown"
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .plainText:
+            return "txt"
+        case .json:
+            return "json"
+        case .csv:
+            return "csv"
+        case .markdown:
+            return "md"
+        }
+    }
+}
+
+enum LogExportFormatter {
+    static func export(_ entries: [LogEntry], format: LogExportFormat) -> String {
+        switch format {
+        case .plainText:
+            return exportPlainText(entries)
+        case .json:
+            return exportJSON(entries)
+        case .csv:
+            return exportCSV(entries)
+        case .markdown:
+            return exportMarkdown(entries)
+        }
+    }
+
+    private static func exportPlainText(_ entries: [LogEntry]) -> String {
+        let formatter = ISO8601DateFormatter()
+        return entries.map { entry in
+            "[\(formatter.string(from: entry.timestamp))] [\(entry.severity.rawValue.uppercased())] [\(entry.category.rawValue)] \(entry.message)"
+        }
+        .joined(separator: "\n")
+    }
+
+    private static func exportJSON(_ entries: [LogEntry]) -> String {
+        let formatter = ISO8601DateFormatter()
+        let payload = entries.map { entry in
+            [
+                "timestamp": formatter.string(from: entry.timestamp),
+                "severity": entry.severity.rawValue,
+                "category": entry.category.rawValue,
+                "message": entry.message
+            ]
+        }
+
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
+            let text = String(data: data, encoding: .utf8)
+        else {
+            return "[]"
+        }
+
+        return text
+    }
+
+    private static func exportCSV(_ entries: [LogEntry]) -> String {
+        let formatter = ISO8601DateFormatter()
+        let rows = entries.map { entry in
+            [
+                formatter.string(from: entry.timestamp),
+                entry.severity.rawValue,
+                entry.category.rawValue,
+                entry.message
+            ]
+            .map(csvEscape)
+            .joined(separator: ",")
+        }
+
+        return ([ "timestamp,severity,category,message" ] + rows).joined(separator: "\n")
+    }
+
+    private static func exportMarkdown(_ entries: [LogEntry]) -> String {
+        let formatter = ISO8601DateFormatter()
+        let rows = entries.map { entry in
+            "| \(formatter.string(from: entry.timestamp)) | \(entry.severity.rawValue) | \(entry.category.rawValue) | \(markdownEscape(entry.message)) |"
+        }
+
+        return ([
+            "| Timestamp | Severity | Category | Message |",
+            "| --- | --- | --- | --- |"
+        ] + rows).joined(separator: "\n")
+    }
+
+    private static func csvEscape(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+        if escaped.contains(",") || escaped.contains("\"") || escaped.contains("\n") {
+            return "\"\(escaped)\""
+        }
+        return escaped
+    }
+
+    private static func markdownEscape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "|", with: "\\|")
+            .replacingOccurrences(of: "\n", with: "<br>")
+    }
+}
+
 final class LoggingService: ObservableObject {
     static let shared = LoggingService()
 
@@ -109,10 +230,6 @@ final class LoggingService: ObservableObject {
     }
 
     func exportText() -> String {
-        let formatter = ISO8601DateFormatter()
-        return entries.map { entry in
-            "[\(formatter.string(from: entry.timestamp))] [\(entry.severity.rawValue.uppercased())] [\(entry.category.rawValue)] \(entry.message)"
-        }
-        .joined(separator: "\n")
+        LogExportFormatter.export(entries, format: .plainText)
     }
 }
