@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum ConnectionStatusFilter: String, CaseIterable, Identifiable {
     case all
@@ -41,22 +42,25 @@ private enum ConnectionSortMode: String, CaseIterable, Identifiable {
 }
 
 struct ContentView: View {
-    @StateObject private var mountService = MountService()
-    @StateObject private var loggingService = LoggingService.shared
-    @StateObject private var discoveryService = SMBDiscoveryService()
+    @ObservedObject var appState: AppState
+    @ObservedObject private var mountService: MountService
     @AppStorage("connectSharesOnLaunch") private var connectSharesOnLaunch = false
     @AppStorage("disconnectSharesOnQuit") private var disconnectSharesOnQuit = false
-    @State private var connections: [SMBConnection] = []
     @State private var editingConnection: SMBConnection?
     @State private var selectedConnection: SMBConnection?
     @State private var isAddingNew = false
     @State private var isShowingDiagnostics = false
     @State private var isShowingDiscovery = false
     @State private var suggestedHost: DiscoveredSMBHost?
-    @State private var hasAppliedLaunchBehavior = false
     @State private var searchText = ""
     @State private var statusFilter: ConnectionStatusFilter = .all
     @State private var sortMode: ConnectionSortMode = .name
+    @State private var importExportMessage: String?
+
+    init(appState: AppState) {
+        self.appState = appState
+        _mountService = ObservedObject(wrappedValue: appState.mountService)
+    }
 
     var body: some View {
         NavigationStack {
@@ -122,6 +126,20 @@ struct ContentView: View {
                     .help("Open Diagnostics Console")
 
                     Button {
+                        importConnections()
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .help("Import Connections")
+
+                    Button {
+                        exportConnections()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .help("Export Connections")
+
+                    Button {
                         suggestedHost = nil
                         isAddingNew = true
                     } label: {
@@ -131,16 +149,19 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $isAddingNew) {
-                ConnectionEditView(existing: nil, suggestedHost: suggestedHost, mountService: mountService) { connection, password in
-                    KeychainService.savePassword(password, for: connection)
-                    connections.append(connection)
-                    saveAndRefresh()
+                ConnectionEditView(
+                    existing: nil,
+                    suggestedHost: suggestedHost,
+                    existingConnections: appState.connections,
+                    mountService: mountService
+                ) { connection, password in
+                    appState.addConnection(connection, password: password)
                 }
             }
             .sheet(isPresented: $isShowingDiscovery) {
                 DiscoveryView(
-                    discoveryService: discoveryService,
-                    configuredHosts: Set(connections.map { $0.serverAddress.lowercased() })
+                    discoveryService: appState.discoveryService,
+                    configuredHosts: Set(appState.connections.map { $0.serverAddress.lowercased() })
                 ) { host in
                     suggestedHost = host
                     DispatchQueue.main.async {
@@ -150,23 +171,18 @@ struct ContentView: View {
             }
             .sheet(isPresented: $isShowingDiagnostics) {
                 DiagnosticsConsoleView(
-                    loggingService: loggingService,
+                    loggingService: appState.loggingService,
                     mountService: mountService,
-                    connections: connections
+                    connections: appState.connections
                 )
             }
             .sheet(item: $editingConnection) { connection in
-                ConnectionEditView(existing: connection, mountService: mountService) { updated, password in
-                    let otherConnections = connections.filter { $0.id != connection.id }
-                    KeychainService.savePassword(password, for: updated)
-                    if let idx = connections.firstIndex(where: { $0.id == updated.id }) {
-                        connections[idx] = updated
-                    }
-                    if connection.serverAddress.caseInsensitiveCompare(updated.serverAddress) != .orderedSame ||
-                        connection.username.caseInsensitiveCompare(updated.username) != .orderedSame {
-                        KeychainService.deletePassword(for: connection, remainingConnections: otherConnections)
-                    }
-                    saveAndRefresh()
+                ConnectionEditView(
+                    existing: connection,
+                    existingConnections: appState.connections,
+                    mountService: mountService
+                ) { updated, password in
+                    appState.updateConnection(original: connection, updated: updated, password: password)
                 }
             }
             .sheet(item: $selectedConnection) { connection in
@@ -188,17 +204,19 @@ struct ContentView: View {
             }
             .onAppear {
                 LoggingService.shared.record(.info, category: .app, message: "Application interface appeared")
-                connections = PersistenceService.load()
-                mountService.startMonitoring(connections: connections)
-                applyLaunchBehaviorIfNeeded()
-            }
-            .onDisappear {
-                LoggingService.shared.record(.info, category: .app, message: "Application interface disappeared")
-                mountService.stopMonitoring()
+                appState.applyLaunchBehaviorIfNeeded(connectSharesOnLaunch: connectSharesOnLaunch)
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                handleApplicationWillTerminate()
+                appState.handleApplicationWillTerminate(disconnectSharesOnQuit: disconnectSharesOnQuit)
             }
+        }
+        .alert("Import / Export", isPresented: Binding(
+            get: { importExportMessage != nil },
+            set: { if $0 == false { importExportMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importExportMessage ?? "")
         }
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 12) {
@@ -217,7 +235,7 @@ struct ContentView: View {
 
                 Spacer()
 
-                Text(summaryLabel)
+                    Text(summaryLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -259,19 +277,19 @@ struct ContentView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: connections.isEmpty ? "externaldrive.connected.to.line.below" : "line.3.horizontal.decrease.circle")
+            Image(systemName: appState.connections.isEmpty ? "externaldrive.connected.to.line.below" : "line.3.horizontal.decrease.circle")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text(connections.isEmpty ? "No Connections" : "No Matches")
+            Text(appState.connections.isEmpty ? "No Connections" : "No Matches")
                 .font(.title2)
-            Text(connections.isEmpty ? "Add an SMB connection to get started." : "Adjust the search text or filters to show saved connections.")
+            Text(appState.connections.isEmpty ? "Add an SMB connection to get started." : "Adjust the search text or filters to show saved connections.")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var filteredConnections: [SMBConnection] {
-        let searched = connections.filter { connection in
+        let searched = appState.connections.filter { connection in
             let haystack = [
                 connection.name,
                 connection.serverAddress,
@@ -318,69 +336,21 @@ struct ContentView: View {
     }
 
     private var summaryLabel: String {
-        let connectedCount = connections.filter { mountService.statuses[$0.id] == .connected }.count
-        return "\(connectedCount)/\(connections.count) connected"
+        let connectedCount = appState.connections.filter { mountService.statuses[$0.id] == .connected }.count
+        return "\(connectedCount)/\(appState.connections.count) connected"
     }
 
     private func deleteConnections(at offsets: IndexSet) {
-        for index in offsets {
-            let connection = filteredConnections[index]
-            let remainingConnections = connections.filter { $0.id != connection.id }
-            KeychainService.deletePassword(for: connection, remainingConnections: remainingConnections)
-            LoggingService.shared.record(.info, category: .ui, message: "Deleted connection \(connection.serverAddress)/\(connection.shareName)")
-            connections.removeAll { $0.id == connection.id }
-        }
-        saveAndRefresh()
+        let ids = offsets.map { filteredConnections[$0].id }
+        appState.deleteConnections(withIDs: Set(ids))
     }
 
     private func connectAll() {
-        for connection in filteredConnections {
-            let status = mountService.statuses[connection.id] ?? .disconnected
-            if status != .connected && status != .connecting {
-                mountService.mount(connection)
-            }
-        }
+        appState.connectAll(filteredConnections)
     }
 
     private func disconnectAll() {
-        for connection in filteredConnections where mountService.statuses[connection.id] == .connected {
-            mountService.unmount(connection)
-        }
-    }
-
-    private func saveAndRefresh() {
-        PersistenceService.save(connections)
-        mountService.updateConnections(connections)
-        LoggingService.shared.record(.debug, category: .ui, message: "Connection list refreshed with \(connections.count) entries")
-    }
-
-    private func applyLaunchBehaviorIfNeeded() {
-        guard hasAppliedLaunchBehavior == false else {
-            return
-        }
-
-        hasAppliedLaunchBehavior = true
-
-        guard connectSharesOnLaunch else {
-            return
-        }
-
-        for connection in connections where connection.autoConnect {
-            let status = mountService.statuses[connection.id] ?? .disconnected
-            if status != .connected && status != .connecting {
-                mountService.mount(connection)
-            }
-        }
-    }
-
-    private func handleApplicationWillTerminate() {
-        guard disconnectSharesOnQuit else {
-            return
-        }
-
-        for connection in connections where mountService.statuses[connection.id] == .connected {
-            mountService.unmount(connection)
-        }
+        appState.disconnectAll(filteredConnections)
     }
 
     private func displayName(for connection: SMBConnection) -> String {
@@ -421,6 +391,43 @@ struct ContentView: View {
 
     private func openMountPoint(for connection: SMBConnection) {
         NSWorkspace.shared.open(URL(fileURLWithPath: connection.mountPoint))
+    }
+
+    private func importConnections() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.title = "Import Connections"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            let result = try appState.importConnections(from: url)
+            importExportMessage = "Imported \(result.imported) connection(s). Skipped \(result.skipped) duplicate(s)."
+        } catch {
+            importExportMessage = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func exportConnections() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "SMBMountManager-connections.json"
+        panel.title = "Export Connections"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            try appState.exportConnections(to: url)
+            importExportMessage = "Exported \(appState.connections.count) connection(s) without passwords."
+        } catch {
+            importExportMessage = "Export failed: \(error.localizedDescription)"
+        }
     }
 
     private var buildRevisionLabel: String {

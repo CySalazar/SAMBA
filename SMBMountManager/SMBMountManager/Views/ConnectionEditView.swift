@@ -5,6 +5,7 @@ struct ConnectionEditView: View {
 
     let existing: SMBConnection?
     let suggestedHost: DiscoveredSMBHost?
+    let existingConnections: [SMBConnection]
     @ObservedObject var mountService: MountService
     let onSave: (SMBConnection, String) -> Void
 
@@ -208,6 +209,15 @@ struct ConnectionEditView: View {
         if trimmedUsername.contains(" ") {
             return "Username should not contain spaces."
         }
+        let isDuplicate = existingConnections.contains { connection in
+            connection.id != existing?.id &&
+                connection.serverAddress.caseInsensitiveCompare(trimmedServer) == .orderedSame &&
+                connection.shareName.caseInsensitiveCompare(trimmedShare) == .orderedSame &&
+                connection.username.caseInsensitiveCompare(trimmedUsername) == .orderedSame
+        }
+        if isDuplicate {
+            return "A connection with the same server, share and username already exists."
+        }
         return nil
     }
 
@@ -258,11 +268,13 @@ struct ConnectionEditView: View {
     init(
         existing: SMBConnection?,
         suggestedHost: DiscoveredSMBHost? = nil,
+        existingConnections: [SMBConnection] = [],
         mountService: MountService,
         onSave: @escaping (SMBConnection, String) -> Void
     ) {
         self.existing = existing
         self.suggestedHost = suggestedHost
+        self.existingConnections = existingConnections
         self.mountService = mountService
         self.onSave = onSave
 

@@ -87,13 +87,13 @@ final class LoggingService: ObservableObject {
 
         switch severity {
         case .error:
-            logger.error("[\(category.rawValue)] \(message, privacy: .public)")
+            logger.error("[\(category.rawValue)] \(message, privacy: .private(mask: .hash))")
         case .warning:
-            logger.warning("[\(category.rawValue)] \(message, privacy: .public)")
+            logger.warning("[\(category.rawValue)] \(message, privacy: .private(mask: .hash))")
         case .info:
-            logger.info("[\(category.rawValue)] \(message, privacy: .public)")
+            logger.info("[\(category.rawValue)] \(message, privacy: .private(mask: .hash))")
         case .debug:
-            logger.debug("[\(category.rawValue)] \(message, privacy: .public)")
+            logger.debug("[\(category.rawValue)] \(message, privacy: .private(mask: .hash))")
         }
 
         DispatchQueue.main.async {

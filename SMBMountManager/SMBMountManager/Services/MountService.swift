@@ -1,6 +1,243 @@
 import AppKit
 import Foundation
 
+enum MountDiagnostics {
+    static func userFacingMountError(from rawError: String?, exitCode: Int32) -> String {
+        let normalizedError = rawError?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        if normalizedError.contains("authentication error") || normalizedError.contains("login failed") {
+            return "Authentication failed. Check username and password."
+        }
+
+        if normalizedError.contains("no route to host") ||
+            normalizedError.contains("host is down") ||
+            normalizedError.contains("could not connect") {
+            return "Server unreachable. Check address, VPN, or network."
+        }
+
+        if normalizedError.contains("operation timed out") || normalizedError.contains("timed out") {
+            return "Connection timed out."
+        }
+
+        if normalizedError.contains("no such file or directory") || normalizedError.contains("not found") {
+            return "Share not found on server."
+        }
+
+        if normalizedError.contains("resource busy") {
+            return "Mount point already in use."
+        }
+
+        if normalizedError.isEmpty == false {
+            return rawError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Mount failed."
+        }
+
+        return "Mount failed (exit code \(exitCode))."
+    }
+
+    static func redactSensitiveValue(in rawValue: String?) -> String? {
+        guard var rawValue else {
+            return nil
+        }
+
+        let patterns = [
+            #"//([^/\s:@]+):([^@\s]+)@"#,
+            #"smb://([^/\s:@]+):([^@\s]+)@"#
+        ]
+
+        for pattern in patterns {
+            rawValue = rawValue.replacingOccurrences(
+                of: pattern,
+                with: #"//$1:<redacted>@"#,
+                options: .regularExpression
+            )
+        }
+
+        return rawValue
+    }
+}
+
+enum MountErrorClassifier {
+    static func classify(_ message: String) -> ConnectionErrorCategory {
+        let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedMessage.contains("authentication") || normalizedMessage.contains("password") || normalizedMessage.contains("login") {
+            return .authentication
+        }
+        if normalizedMessage.contains("timed out") {
+            return .timeout
+        }
+        if normalizedMessage.contains("share not found") || normalizedMessage.contains("not found") {
+            return .shareNotFound
+        }
+        if normalizedMessage.contains("mount point") || normalizedMessage.contains("resource busy") {
+            return .mountPointBusy
+        }
+        if normalizedMessage.contains("server unreachable") || normalizedMessage.contains("host") || normalizedMessage.contains("network") || normalizedMessage.contains("route") {
+            return .connectivity
+        }
+        return .unknown
+    }
+}
+
+enum MountRequestEnqueueOutcome: Equatable {
+    case enqueued
+    case upgradedActive
+    case upgradedPending
+    case alreadyActive
+    case alreadyQueued
+}
+
+enum MountRequestFinishOutcome: Equatable {
+    case finishedActive
+    case removedPending
+    case none
+}
+
+struct AutomaticRetryRegistrationResult: Equatable {
+    let updatedCount: Int
+    let reachedLimit: Bool
+}
+
+struct AutomaticRetryTracker {
+    private(set) var counts: [UUID: Int] = [:]
+
+    mutating func prune(validConnectionIDs: Set<UUID>) {
+        counts = counts.filter { validConnectionIDs.contains($0.key) }
+    }
+
+    mutating func reset(for connectionID: UUID) {
+        counts[connectionID] = 0
+    }
+
+    func count(for connectionID: UUID) -> Int {
+        counts[connectionID, default: 0]
+    }
+
+    func canAutomaticallyRetry(_ connectionID: UUID, maximumAutomaticRetryCount: Int) -> Bool {
+        count(for: connectionID) < maximumAutomaticRetryCount
+    }
+
+    @discardableResult
+    mutating func registerFailure(
+        for connectionID: UUID,
+        initiatedByUser: Bool,
+        maximumAutomaticRetryCount: Int = .max
+    ) -> AutomaticRetryRegistrationResult {
+        let updatedCount = initiatedByUser ? 1 : count(for: connectionID) + 1
+        counts[connectionID] = updatedCount
+        return AutomaticRetryRegistrationResult(
+            updatedCount: updatedCount,
+            reachedLimit: updatedCount >= maximumAutomaticRetryCount
+        )
+    }
+}
+
+enum BackgroundRefreshPolicy {
+    static func shouldRunProbe(
+        now: Date,
+        lastRunAt: Date?,
+        isAlreadyRunning: Bool,
+        interval: TimeInterval,
+        status: ConnectionStatus?,
+        force: Bool
+    ) -> Bool {
+        if isAlreadyRunning {
+            return false
+        }
+        if force {
+            return true
+        }
+        if let lastRunAt, now.timeIntervalSince(lastRunAt) < interval {
+            return false
+        }
+        if case .error = status {
+            return false
+        }
+        return true
+    }
+
+    static func shouldRefreshSessionDetails(
+        now: Date,
+        lastRunAt: Date?,
+        isAlreadyRunning: Bool,
+        interval: TimeInterval,
+        force: Bool
+    ) -> Bool {
+        if isAlreadyRunning {
+            return false
+        }
+        if force {
+            return true
+        }
+        if let lastRunAt, now.timeIntervalSince(lastRunAt) < interval {
+            return false
+        }
+        return true
+    }
+}
+
+struct MountRequestQueue {
+    private(set) var pendingRequests: [MountRequest] = []
+    private(set) var activeRequest: MountRequest?
+
+    mutating func prune(validConnectionIDs: Set<UUID>) {
+        pendingRequests.removeAll { request in
+            !validConnectionIDs.contains(request.connectionID)
+        }
+
+        if let activeRequest, !validConnectionIDs.contains(activeRequest.connectionID) {
+            self.activeRequest = nil
+        }
+    }
+
+    mutating func enqueue(connectionID: UUID, initiatedByUser: Bool) -> MountRequestEnqueueOutcome {
+        if activeRequest?.connectionID == connectionID {
+            if initiatedByUser, activeRequest?.initiatedByUser == false {
+                activeRequest = MountRequest(connectionID: connectionID, initiatedByUser: true)
+                return .upgradedActive
+            }
+            return .alreadyActive
+        }
+
+        if let index = pendingRequests.firstIndex(where: { $0.connectionID == connectionID }) {
+            if initiatedByUser, pendingRequests[index].initiatedByUser == false {
+                pendingRequests[index] = MountRequest(connectionID: connectionID, initiatedByUser: true)
+                return .upgradedPending
+            }
+            return .alreadyQueued
+        }
+
+        pendingRequests.append(MountRequest(connectionID: connectionID, initiatedByUser: initiatedByUser))
+        return .enqueued
+    }
+
+    mutating func dequeueNext() -> MountRequest? {
+        guard activeRequest == nil, let next = pendingRequests.first else {
+            return nil
+        }
+
+        pendingRequests.removeFirst()
+        activeRequest = next
+        return next
+    }
+
+    mutating func finish(connectionID: UUID) -> MountRequestFinishOutcome {
+        if activeRequest?.connectionID == connectionID {
+            activeRequest = nil
+            return .finishedActive
+        }
+
+        let originalCount = pendingRequests.count
+        pendingRequests.removeAll { $0.connectionID == connectionID }
+        return pendingRequests.count == originalCount ? .none : .removedPending
+    }
+
+    func contains(connectionID: UUID) -> Bool {
+        activeRequest?.connectionID == connectionID || pendingRequests.contains(where: { $0.connectionID == connectionID })
+    }
+}
+
 @MainActor
 final class MountService: ObservableObject {
     @Published var statuses: [UUID: ConnectionStatus] = [:]
@@ -39,9 +276,8 @@ final class MountService: ObservableObject {
     private var statusTimer: Timer?
     private var autoConnectTimer: Timer?
     private var connections: [SMBConnection] = []
-    private var pendingMountRequests: [MountRequest] = []
-    private var activeMountRequest: MountRequest?
-    private var automaticRetryCounts: [UUID: Int] = [:]
+    private var mountRequestQueue = MountRequestQueue()
+    private var automaticRetryTracker = AutomaticRetryTracker()
     private var consecutiveMissedChecks: [UUID: Int] = [:]
     private var telemetry: [UUID: ConnectionTelemetry] = [:]
     private let fileManager = FileManager.default
@@ -99,12 +335,8 @@ final class MountService: ObservableObject {
     func updateConnections(_ connections: [SMBConnection]) {
         self.connections = connections
         hydrateTelemetryFromPersistedRuntimeDetails(for: connections)
-        pendingMountRequests.removeAll { request in
-            !connections.contains(where: { $0.id == request.connectionID })
-        }
-        automaticRetryCounts = automaticRetryCounts.filter { connectionID, _ in
-            connections.contains(where: { $0.id == connectionID })
-        }
+        mountRequestQueue.prune(validConnectionIDs: Set(connections.map(\.id)))
+        automaticRetryTracker.prune(validConnectionIDs: Set(connections.map(\.id)))
         consecutiveMissedChecks = consecutiveMissedChecks.filter { connectionID, _ in
             connections.contains(where: { $0.id == connectionID })
         }
@@ -113,10 +345,6 @@ final class MountService: ObservableObject {
         }
         runtimeDetails = runtimeDetails.filter { connectionID, _ in
             connections.contains(where: { $0.id == connectionID })
-        }
-        if let activeMountRequest,
-           !connections.contains(where: { $0.id == activeMountRequest.connectionID }) {
-            self.activeMountRequest = nil
         }
         LoggingService.shared.record(.debug, category: .mount, message: "Updated monitored connections to \(connections.count)")
         PersistenceService.saveRuntimeDetails(runtimeDetails)
@@ -130,7 +358,7 @@ final class MountService: ObservableObject {
         if isMounted(connection) {
             setStatus(.connected, for: connection.id)
             LoggingService.shared.record(.debug, category: .mount, message: "Mount skipped for \(connection.serverAddress)/\(connection.shareName): already connected")
-            automaticRetryCounts[connection.id] = 0
+            automaticRetryTracker.reset(for: connection.id)
             updateTelemetry(for: connection.id) { telemetry in
                 telemetry.automaticRetryCount = 0
             }
@@ -138,11 +366,11 @@ final class MountService: ObservableObject {
         }
 
         if initiatedByUser {
-            automaticRetryCounts[connection.id] = 0
+            automaticRetryTracker.reset(for: connection.id)
             updateTelemetry(for: connection.id) { telemetry in
                 telemetry.automaticRetryCount = 0
             }
-        } else if automaticRetryCounts[connection.id, default: 0] >= maximumAutomaticRetryCount {
+        } else if automaticRetryTracker.canAutomaticallyRetry(connection.id, maximumAutomaticRetryCount: maximumAutomaticRetryCount) == false {
             setStatus(.error("Automatic retry limit reached"), for: connection.id)
             LoggingService.shared.record(
                 .warning,
@@ -152,30 +380,26 @@ final class MountService: ObservableObject {
             return
         }
 
-        if activeMountRequest?.connectionID == connection.id {
-            if initiatedByUser, activeMountRequest?.initiatedByUser == false {
-                activeMountRequest = MountRequest(connectionID: connection.id, initiatedByUser: true)
+        switch mountRequestQueue.enqueue(connectionID: connection.id, initiatedByUser: initiatedByUser) {
+        case .upgradedActive:
                 LoggingService.shared.record(.debug, category: .mount, message: "Active mount upgraded to explicit user request for \(connection.serverAddress)/\(connection.shareName)")
-            } else {
+            return
+        case .alreadyActive:
                 LoggingService.shared.record(.debug, category: .mount, message: "Mount request ignored for \(connection.serverAddress)/\(connection.shareName): already in progress")
-            }
             return
-        }
-
-        if let index = pendingMountRequests.firstIndex(where: { $0.connectionID == connection.id }) {
-            if initiatedByUser, pendingMountRequests[index].initiatedByUser == false {
-                pendingMountRequests[index] = MountRequest(connectionID: connection.id, initiatedByUser: true)
+        case .upgradedPending:
                 LoggingService.shared.record(.debug, category: .mount, message: "Queued mount upgraded to explicit user request for \(connection.serverAddress)/\(connection.shareName)")
-            } else {
-                LoggingService.shared.record(.debug, category: .mount, message: "Mount request ignored for \(connection.serverAddress)/\(connection.shareName): already queued")
-            }
             return
+        case .alreadyQueued:
+                LoggingService.shared.record(.debug, category: .mount, message: "Mount request ignored for \(connection.serverAddress)/\(connection.shareName): already queued")
+            return
+        case .enqueued:
+            break
         }
 
         setStatus(.connecting, for: connection.id)
-        pendingMountRequests.append(MountRequest(connectionID: connection.id, initiatedByUser: initiatedByUser))
         let origin = initiatedByUser ? "user" : "automatic"
-        LoggingService.shared.record(.info, category: .mount, message: "Queued \(origin) mount for \(connection.serverAddress)/\(connection.shareName) | pending=\(pendingMountRequests.count) active=\(activeMountRequest?.connectionID.uuidString ?? "none")")
+        LoggingService.shared.record(.info, category: .mount, message: "Queued \(origin) mount for \(connection.serverAddress)/\(connection.shareName) | pending=\(mountRequestQueue.pendingRequests.count) active=\(mountRequestQueue.activeRequest?.connectionID.uuidString ?? "none")")
         processNextMountIfNeeded()
     }
 
@@ -212,7 +436,11 @@ final class MountService: ObservableObject {
             mountPointURL.path
         ]
 
-        LoggingService.shared.record(.debug, category: .mount, message: "Launching /sbin/mount for \(connection.serverAddress)/\(connection.shareName) | arguments=\(process.arguments?.joined(separator: " ") ?? "none")")
+        LoggingService.shared.record(
+            .debug,
+            category: .mount,
+            message: "Launching /sbin/mount for \(connection.serverAddress)/\(connection.shareName) | mountPoint=\(mountPointURL.path) options=nobrowse,nopassprompt"
+        )
 
         let standardError = Pipe()
         process.standardError = standardError
@@ -287,14 +515,14 @@ final class MountService: ObservableObject {
         if isMounted(connection) {
             setStatus(.connected, for: connection.id)
             LoggingService.shared.record(.info, category: .mount, message: "Connection marked connected for \(connection.serverAddress)/\(connection.shareName)")
-            automaticRetryCounts[connection.id] = 0
+            automaticRetryTracker.reset(for: connection.id)
             updateTelemetry(for: connection.id) { telemetry in
                 telemetry.automaticRetryCount = 0
             }
         } else if statuses[connection.id] == .connecting {
             setStatus(.error("Mount did not appear"), for: connection.id)
             LoggingService.shared.record(.error, category: .mount, message: "Mount timed out for \(connection.serverAddress)/\(connection.shareName)")
-            registerFailure(for: connection.id, initiatedByUser: activeMountRequest?.initiatedByUser ?? false)
+            registerFailure(for: connection.id, initiatedByUser: mountRequestQueue.activeRequest?.initiatedByUser ?? false)
         }
 
         finishMountAttempt(for: connection.id)
@@ -310,11 +538,11 @@ final class MountService: ObservableObject {
             let current = statuses[connection.id]
             let mounted = isMounted(connection)
 
-            LoggingService.shared.record(.debug, category: .mount, message: "Refresh status for \(connection.serverAddress)/\(connection.shareName) | current=\(current?.label ?? "nil") mounted=\(mounted) active=\(activeMountRequest?.connectionID == connection.id) queued=\(pendingMountRequests.contains(where: { $0.connectionID == connection.id })) retries=\(automaticRetryCounts[connection.id, default: 0]) missedChecks=\(consecutiveMissedChecks[connection.id, default: 0])")
+            LoggingService.shared.record(.debug, category: .mount, message: "Refresh status for \(connection.serverAddress)/\(connection.shareName) | current=\(current?.label ?? "nil") mounted=\(mounted) active=\(mountRequestQueue.activeRequest?.connectionID == connection.id) queued=\(mountRequestQueue.pendingRequests.contains(where: { $0.connectionID == connection.id })) retries=\(automaticRetryTracker.count(for: connection.id)) missedChecks=\(consecutiveMissedChecks[connection.id, default: 0])")
 
             if mounted {
                 setStatus(.connected, for: connection.id)
-                automaticRetryCounts[connection.id] = 0
+                automaticRetryTracker.reset(for: connection.id)
                 consecutiveMissedChecks[connection.id] = 0
                 updateTelemetry(for: connection.id) { telemetry in
                     telemetry.automaticRetryCount = 0
@@ -379,7 +607,7 @@ final class MountService: ObservableObject {
             if process.isRunning == false {
                 if process.terminationStatus == 0 {
                     setStatus(.connected, for: connection.id)
-                    automaticRetryCounts[connection.id] = 0
+                    automaticRetryTracker.reset(for: connection.id)
                     consecutiveMissedChecks[connection.id] = 0
                     updateTelemetry(for: connection.id) { telemetry in
                         telemetry.automaticRetryCount = 0
@@ -396,9 +624,14 @@ final class MountService: ObservableObject {
 
                 let errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                let message = userFacingMountError(from: errorOutput, exitCode: process.terminationStatus)
+                let redactedErrorOutput = MountDiagnostics.redactSensitiveValue(in: errorOutput)
+                let message = MountDiagnostics.userFacingMountError(from: errorOutput, exitCode: process.terminationStatus)
                 setStatus(.error(message), for: connection.id)
-                LoggingService.shared.record(.error, category: .mount, message: "Silent mount failed for \(connection.serverAddress)/\(connection.shareName) | exitCode=\(process.terminationStatus) stderr=\(errorOutput ?? "none") mappedMessage=\(message)")
+                LoggingService.shared.record(
+                    .error,
+                    category: .mount,
+                    message: "Silent mount failed for \(connection.serverAddress)/\(connection.shareName) | exitCode=\(process.terminationStatus) stderr=\(redactedErrorOutput ?? "none") mappedMessage=\(message)"
+                )
                 registerFailure(for: connection.id, initiatedByUser: initiatedByUser)
                 finishMountAttempt(for: connection.id)
                 return
@@ -451,40 +684,6 @@ final class MountService: ObservableObject {
 
     private func encodedSMBPathComponent(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
-    }
-
-    private func userFacingMountError(from rawError: String?, exitCode: Int32) -> String {
-        let normalizedError = rawError?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? ""
-
-        if normalizedError.contains("authentication error") || normalizedError.contains("login failed") {
-            return "Authentication failed. Check username and password."
-        }
-
-        if normalizedError.contains("no route to host") ||
-            normalizedError.contains("host is down") ||
-            normalizedError.contains("could not connect") {
-            return "Server unreachable. Check address, VPN, or network."
-        }
-
-        if normalizedError.contains("operation timed out") || normalizedError.contains("timed out") {
-            return "Connection timed out."
-        }
-
-        if normalizedError.contains("no such file or directory") || normalizedError.contains("not found") {
-            return "Share not found on server."
-        }
-
-        if normalizedError.contains("resource busy") {
-            return "Mount point already in use."
-        }
-
-        if normalizedError.isEmpty == false {
-            return rawError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Mount failed."
-        }
-
-        return "Mount failed (exit code \(exitCode))."
     }
 
     func runBenchmark(for connection: SMBConnection) async {
@@ -553,23 +752,20 @@ final class MountService: ObservableObject {
         }
 
         let telemetry = telemetry(for: connection.id)
-        if force == false {
-            if telemetry.isProbing {
-                return
-            }
-
-            if let lastProbeAt = telemetry.lastProbeAt,
-               Date().timeIntervalSince(lastProbeAt) < probeIntervalSeconds {
-                return
-            }
-
-            if case .error = statuses[connection.id] {
-                return
-            }
+        let now = Date()
+        guard BackgroundRefreshPolicy.shouldRunProbe(
+            now: now,
+            lastRunAt: telemetry.lastProbeAt,
+            isAlreadyRunning: telemetry.isProbing,
+            interval: probeIntervalSeconds,
+            status: statuses[connection.id],
+            force: force
+        ) else {
+            return
         }
 
         telemetry.isProbing = true
-        telemetry.lastProbeAt = Date()
+        telemetry.lastProbeAt = now
         self.telemetry[connection.id] = telemetry
 
         Task.detached(priority: .utility) { [weak self] in
@@ -610,19 +806,19 @@ final class MountService: ObservableObject {
         }
 
         let telemetry = telemetry(for: connection.id)
-        if force == false {
-            if telemetry.isRefreshingSessionDetails {
-                return
-            }
-
-            if let lastSessionRefreshAt = telemetry.lastSessionRefreshAt,
-               Date().timeIntervalSince(lastSessionRefreshAt) < sessionRefreshIntervalSeconds {
-                return
-            }
+        let now = Date()
+        guard BackgroundRefreshPolicy.shouldRefreshSessionDetails(
+            now: now,
+            lastRunAt: telemetry.lastSessionRefreshAt,
+            isAlreadyRunning: telemetry.isRefreshingSessionDetails,
+            interval: sessionRefreshIntervalSeconds,
+            force: force
+        ) else {
+            return
         }
 
         telemetry.isRefreshingSessionDetails = true
-        telemetry.lastSessionRefreshAt = Date()
+        telemetry.lastSessionRefreshAt = now
         self.telemetry[connection.id] = telemetry
 
         Task.detached(priority: .utility) { [weak self] in
@@ -808,81 +1004,75 @@ final class MountService: ObservableObject {
     }
 
     private func processNextMountIfNeeded() {
-        guard activeMountRequest == nil else {
+        guard mountRequestQueue.activeRequest == nil else {
             return
         }
 
-        while let nextMountRequest = pendingMountRequests.first {
-            pendingMountRequests.removeFirst()
-
+        while let nextMountRequest = mountRequestQueue.dequeueNext() {
             guard let connection = connections.first(where: { $0.id == nextMountRequest.connectionID }) else {
                 LoggingService.shared.record(.warning, category: .mount, message: "Dropped queued mount for missing connection id \(nextMountRequest.connectionID.uuidString)")
+                _ = mountRequestQueue.finish(connectionID: nextMountRequest.connectionID)
                 continue
             }
 
             if isMounted(connection) {
                 setStatus(.connected, for: connection.id)
-                automaticRetryCounts[connection.id] = 0
+                automaticRetryTracker.reset(for: connection.id)
                 updateTelemetry(for: connection.id) { telemetry in
                     telemetry.automaticRetryCount = 0
                 }
                 LoggingService.shared.record(.info, category: .mount, message: "Queued mount resolved immediately because share is already mounted for \(connection.serverAddress)/\(connection.shareName)")
+                _ = mountRequestQueue.finish(connectionID: connection.id)
                 continue
             }
 
-            activeMountRequest = nextMountRequest
-            LoggingService.shared.record(.debug, category: .mount, message: "Dequeued mount request for \(connection.serverAddress)/\(connection.shareName) | initiatedByUser=\(nextMountRequest.initiatedByUser) remainingPending=\(pendingMountRequests.count)")
+            LoggingService.shared.record(.debug, category: .mount, message: "Dequeued mount request for \(connection.serverAddress)/\(connection.shareName) | initiatedByUser=\(nextMountRequest.initiatedByUser) remainingPending=\(mountRequestQueue.pendingRequests.count)")
             startMount(connection, initiatedByUser: nextMountRequest.initiatedByUser)
             return
         }
     }
 
     private func finishMountAttempt(for connectionID: UUID) {
-        if activeMountRequest?.connectionID == connectionID {
+        switch mountRequestQueue.finish(connectionID: connectionID) {
+        case .finishedActive:
             LoggingService.shared.record(.debug, category: .mount, message: "Finishing active mount attempt for connection id \(connectionID.uuidString)")
-            activeMountRequest = nil
             processNextMountIfNeeded()
-        } else {
+        case .removedPending:
             LoggingService.shared.record(.debug, category: .mount, message: "Removing stale queued mount attempts for connection id \(connectionID.uuidString)")
-            pendingMountRequests.removeAll { $0.connectionID == connectionID }
+        case .none:
+            break
         }
     }
 
     private func registerFailure(for connectionID: UUID, initiatedByUser: Bool) {
-        guard initiatedByUser == false else {
-            automaticRetryCounts[connectionID] = 1
-            updateTelemetry(for: connectionID) { telemetry in
-                telemetry.automaticRetryCount = 1
-            }
-            return
-        }
-
-        let newCount = automaticRetryCounts[connectionID, default: 0] + 1
-        automaticRetryCounts[connectionID] = newCount
+        let result = automaticRetryTracker.registerFailure(
+            for: connectionID,
+            initiatedByUser: initiatedByUser,
+            maximumAutomaticRetryCount: maximumAutomaticRetryCount
+        )
         updateTelemetry(for: connectionID) { telemetry in
-            telemetry.automaticRetryCount = newCount
+            telemetry.automaticRetryCount = result.updatedCount
         }
 
         if let connection = connections.first(where: { $0.id == connectionID }) {
-            if newCount >= maximumAutomaticRetryCount {
+            if result.reachedLimit {
                 LoggingService.shared.record(
                     .warning,
                     category: .mount,
-                    message: "Automatic reconnect disabled for \(connection.serverAddress)/\(connection.shareName) after \(newCount) failed attempts"
+                    message: "Automatic reconnect disabled for \(connection.serverAddress)/\(connection.shareName) after \(result.updatedCount) failed attempts"
                 )
             } else {
                 LoggingService.shared.record(
                     .warning,
                     category: .mount,
-                    message: "Automatic reconnect attempt \(newCount) of \(maximumAutomaticRetryCount) failed for \(connection.serverAddress)/\(connection.shareName)"
+                    message: "Automatic reconnect attempt \(result.updatedCount) of \(maximumAutomaticRetryCount) failed for \(connection.serverAddress)/\(connection.shareName)"
                 )
             }
         }
     }
 
     private func isMountAttemptPending(for connectionID: UUID) -> Bool {
-        activeMountRequest?.connectionID == connectionID ||
-            pendingMountRequests.contains(where: { $0.connectionID == connectionID })
+        mountRequestQueue.contains(connectionID: connectionID)
     }
 
     /// Sets the status for a connection only when the new value differs from
@@ -930,32 +1120,12 @@ final class MountService: ObservableObject {
     private func updateTelemetryStatus(for connectionID: UUID, oldStatus: ConnectionStatus?, newStatus: ConnectionStatus) {
         updateTelemetry(for: connectionID) { telemetry in
             telemetry.recordStatusTransition(from: oldStatus, to: newStatus)
-            telemetry.automaticRetryCount = automaticRetryCounts[connectionID, default: telemetry.automaticRetryCount]
+            telemetry.automaticRetryCount = automaticRetryTracker.count(for: connectionID)
             telemetry.recordTimeline(kind: .status, title: "Status changed", details: newStatus.label)
             if case .error(let message) = newStatus {
-                telemetry.recordError(category: Self.classifyError(from: message), message: message)
+                telemetry.recordError(category: MountErrorClassifier.classify(message), message: message)
             }
         }
-    }
-
-    private static func classifyError(from message: String) -> ConnectionErrorCategory {
-        let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalizedMessage.contains("authentication") || normalizedMessage.contains("password") || normalizedMessage.contains("login") {
-            return .authentication
-        }
-        if normalizedMessage.contains("timed out") {
-            return .timeout
-        }
-        if normalizedMessage.contains("share not found") || normalizedMessage.contains("not found") {
-            return .shareNotFound
-        }
-        if normalizedMessage.contains("mount point") || normalizedMessage.contains("resource busy") {
-            return .mountPointBusy
-        }
-        if normalizedMessage.contains("server unreachable") || normalizedMessage.contains("host") || normalizedMessage.contains("network") || normalizedMessage.contains("route") {
-            return .connectivity
-        }
-        return .unknown
     }
 
     private func volumeDetails(for mountedVolumeURL: URL) -> (path: String, name: String?, total: Int64?, available: Int64?) {
@@ -990,7 +1160,7 @@ final class MountService: ObservableObject {
     }
 }
 
-private struct MountRequest {
+struct MountRequest: Equatable {
     let connectionID: UUID
     let initiatedByUser: Bool
 }

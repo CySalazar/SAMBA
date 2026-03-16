@@ -22,7 +22,18 @@
 		AA00000D /* DiagnosticsConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000F; };
 		AA00000E /* DiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000010; };
 		AA00000F /* SMBShareDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000011; };
+		BA000001 /* MountDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BC000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE000010 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AE000001;
+			remoteInfo = SMBMountManager;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		AB000001 /* SMBMountManagerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMBMountManagerApp.swift; sourceTree = "<group>"; };
@@ -42,10 +53,19 @@
 		AB00000F /* DiagnosticsConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsConsoleView.swift; sourceTree = "<group>"; };
 		AB000010 /* DiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryView.swift; sourceTree = "<group>"; };
 		AB000011 /* SMBShareDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMBShareDetails.swift; sourceTree = "<group>"; };
+		BB000001 /* MountDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MountDiagnosticsTests.swift; sourceTree = "<group>"; };
+		BB000002 /* SMBMountManagerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SMBMountManagerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AC000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BC000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -59,6 +79,7 @@
 			isa = PBXGroup;
 			children = (
 				AD000002 /* SMBMountManager */,
+				BD000001 /* SMBMountManagerTests */,
 				AD000006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -114,8 +135,17 @@
 			isa = PBXGroup;
 			children = (
 				AB00000B /* SMBMountManager.app */,
+				BB000002 /* SMBMountManagerTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		BD000001 /* SMBMountManagerTests */ = {
+			isa = PBXGroup;
+			children = (
+				BB000001 /* MountDiagnosticsTests.swift */,
+			);
+			path = SMBMountManagerTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -139,6 +169,23 @@
 			productReference = AB00000B /* SMBMountManager.app */;
 			productType = "com.apple.product-type.application";
 		};
+		BE000001 /* SMBMountManagerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BF000003 /* Build configuration list for PBXNativeTarget "SMBMountManagerTests" */;
+			buildPhases = (
+				BE000002 /* Sources */,
+				BC000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BC000003 /* PBXTargetDependency */,
+			);
+			name = SMBMountManagerTests;
+			productName = SMBMountManagerTests;
+			productReference = BB000002 /* SMBMountManagerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -151,6 +198,10 @@
 				TargetAttributes = {
 					AE000001 = {
 						CreatedOnToolsVersion = 15.0;
+					};
+					BE000001 = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = AE000001;
 					};
 				};
 			};
@@ -168,6 +219,7 @@
 			projectRoot = "";
 			targets = (
 				AE000001 /* SMBMountManager */,
+				BE000001 /* SMBMountManagerTests */,
 			);
 		};
 /* End PBXProject section */
@@ -206,7 +258,6 @@
 		};
 /* End PBXShellScriptBuildPhase section */
 
-
 /* Begin PBXSourcesBuildPhase section */
 		AE000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -229,7 +280,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BE000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BA000001 /* MountDiagnosticsTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BC000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AE000001 /* SMBMountManager */;
+			targetProxy = BC000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AF000010 /* Debug */ = {
@@ -404,6 +471,42 @@
 			};
 			name = Release;
 		};
+		BF000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SMBMountManager.app/Contents/MacOS/SMBMountManager";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.matteo.SMBMountManagerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = SMBMountManager;
+			};
+			name = Debug;
+		};
+		BF000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SMBMountManager.app/Contents/MacOS/SMBMountManager";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.matteo.SMBMountManagerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = SMBMountManager;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -421,6 +524,15 @@
 			buildConfigurations = (
 				AF000020 /* Debug */,
 				AF000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BF000003 /* Build configuration list for PBXNativeTarget "SMBMountManagerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BF000001 /* Debug */,
+				BF000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

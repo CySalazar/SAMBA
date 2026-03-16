@@ -12,15 +12,6 @@ struct SMBMountManagerApp: App {
         }
         .defaultSize(width: 600, height: 400)
 
-        MenuBarExtra(
-            "SMB Mount Manager",
-            systemImage: "externaldrive.connected.to.line.below",
-            isInserted: $appState.showMenuBarExtra
-        ) {
-            MenuBarContent(appState: appState)
-        }
-        .menuBarExtraStyle(.window)
-
         Settings {
             SettingsView(appState: appState)
         }
@@ -181,91 +172,16 @@ final class AppState: ObservableObject {
     }
 
     private func refreshLaunchAtLoginState() {
-        let statusDescription = String(describing: SMAppService.mainApp.status).lowercased()
-        launchAtLoginEnabled = statusDescription.contains("notregistered") == false
-        launchAtLoginRequiresApproval = statusDescription.contains("requiresapproval")
-    }
-}
+        Task.detached(priority: .utility) {
+            let statusDescription = String(describing: SMAppService.mainApp.status).lowercased()
+            let isEnabled = statusDescription.contains("notregistered") == false
+            let requiresApproval = statusDescription.contains("requiresapproval")
 
-private struct MenuBarContent: View {
-    @Environment(\.openWindow) private var openWindow
-    @ObservedObject var appState: AppState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("SMB Mount Manager")
-                        .font(.headline)
-                    Text("\(connectedCount)/\(appState.connections.count) connected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Open Window") {
-                    openWindow(id: "main")
-                }
-            }
-
-            HStack {
-                Button("Connect All") {
-                    appState.connectAll()
-                }
-                Button("Disconnect All") {
-                    appState.disconnectAll()
-                }
-            }
-
-            Toggle(
-                "Launch at Login",
-                isOn: Binding(
-                    get: { appState.launchAtLoginEnabled },
-                    set: { appState.toggleLaunchAtLogin($0) }
-                )
-            )
-
-            if appState.launchAtLoginRequiresApproval {
-                Button("Open Login Items Settings") {
-                    appState.openLoginItemsSettings()
-                }
-                .font(.caption)
-            }
-
-            Divider()
-
-            if appState.connections.isEmpty {
-                Text("No saved connections")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(appState.connections.prefix(5)) { connection in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(connection.name.isEmpty ? connection.shareName : connection.name)
-                            Text(connection.serverAddress)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Text(appState.mountService.statuses[connection.id]?.label ?? "Disconnected")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            Divider()
-
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
+            await MainActor.run {
+                self.launchAtLoginEnabled = isEnabled
+                self.launchAtLoginRequiresApproval = requiresApproval
             }
         }
-        .padding(14)
-        .frame(width: 320)
-    }
-
-    private var connectedCount: Int {
-        appState.connections.filter { appState.mountService.statuses[$0.id] == .connected }.count
     }
 }
 

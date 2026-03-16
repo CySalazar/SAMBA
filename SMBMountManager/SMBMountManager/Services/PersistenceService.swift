@@ -1,5 +1,28 @@
 import Foundation
 
+enum PersistenceCodec {
+    static func decodeConnections(from data: Data) throws -> [SMBConnection] {
+        try JSONDecoder().decode([SMBConnection].self, from: data)
+    }
+
+    static func encodeConnections(_ connections: [SMBConnection]) throws -> Data {
+        try JSONEncoder().encode(connections)
+    }
+
+    static func decodeRuntimeDetails(from data: Data) throws -> [UUID: SMBConnectionRuntimeDetails] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([UUID: SMBConnectionRuntimeDetails].self, from: data)
+    }
+
+    static func encodeRuntimeDetails(_ runtimeDetails: [UUID: SMBConnectionRuntimeDetails]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(runtimeDetails)
+    }
+}
+
 struct PersistenceService {
     struct PersistedConnectionState: Codable {
         var connections: [SMBConnection]
@@ -26,7 +49,7 @@ struct PersistenceService {
         }
         do {
             let data = try Data(contentsOf: fileURL)
-            let connections = try JSONDecoder().decode([SMBConnection].self, from: data)
+            let connections = try PersistenceCodec.decodeConnections(from: data)
             LoggingService.shared.record(.info, category: .persistence, message: "Loaded \(connections.count) persisted connections")
             return connections
         } catch {
@@ -38,7 +61,7 @@ struct PersistenceService {
     static func save(_ connections: [SMBConnection]) {
         do {
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(connections)
+            let data = try PersistenceCodec.encodeConnections(connections)
             try data.write(to: fileURL, options: .atomic)
             LoggingService.shared.record(.info, category: .persistence, message: "Saved \(connections.count) connections")
         } catch {
@@ -53,9 +76,7 @@ struct PersistenceService {
 
         do {
             let data = try Data(contentsOf: runtimeDetailsURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let details = try decoder.decode([UUID: SMBConnectionRuntimeDetails].self, from: data)
+            let details = try PersistenceCodec.decodeRuntimeDetails(from: data)
             LoggingService.shared.record(.info, category: .persistence, message: "Loaded runtime details for \(details.count) connections")
             return details
         } catch {
@@ -67,10 +88,7 @@ struct PersistenceService {
     static func saveRuntimeDetails(_ runtimeDetails: [UUID: SMBConnectionRuntimeDetails]) {
         do {
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(runtimeDetails)
+            let data = try PersistenceCodec.encodeRuntimeDetails(runtimeDetails)
             try data.write(to: runtimeDetailsURL, options: .atomic)
         } catch {
             LoggingService.shared.record(.warning, category: .persistence, message: "Failed to save runtime details: \(error.localizedDescription)")
