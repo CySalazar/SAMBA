@@ -503,10 +503,15 @@ private struct ConnectionDetailsSheet: View {
                         detailRow("Read", String(format: "%.2f MB/s", benchmark.readThroughputMBps))
                     }
 
+                    Text("Inspecting a mounted share reads live file-system details and macOS may ask for permission to access the network volume.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     HStack {
                         Button("Run Benchmark", action: onBenchmark)
                             .disabled(status != .connected || runtimeDetails.isBenchmarkRunning)
-                        Button("Refresh Details", action: onRefresh)
+                        Button("Inspect Share", action: onRefresh)
+                            .disabled(status != .connected)
                         Button("Open Mount Point", action: onOpenMountPoint)
                         Button("Copy SMB URL", action: onCopyURL)
                     }

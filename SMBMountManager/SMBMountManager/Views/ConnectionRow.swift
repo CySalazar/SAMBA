@@ -80,7 +80,8 @@ struct ConnectionRow: View {
             Button("Copy SMB URL", action: onCopyURL)
             Button("Open Mount Point", action: onOpenMountPoint)
                 .disabled(status != .connected)
-            Button("Refresh Details", action: onRefreshDetails)
+            Button("Inspect Share (May Prompt)", action: onRefreshDetails)
+                .disabled(status != .connected)
             Button("Run Benchmark", action: onRunBenchmark)
                 .disabled(status != .connected || runtimeDetails.isBenchmarkRunning)
         }

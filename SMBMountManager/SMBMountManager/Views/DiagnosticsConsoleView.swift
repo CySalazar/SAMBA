@@ -116,6 +116,10 @@ struct DiagnosticsConsoleView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Connect auto-connect shares when the app launches", isOn: $connectSharesOnLaunch)
                 Toggle("Disconnect connected shares when the app quits", isOn: $disconnectSharesOnQuit)
+                Toggle("Run background diagnostics on mounted shares", isOn: $mountService.backgroundDiagnosticsEnabled)
+                Text("When disabled, the app stops scanning mounted network volumes in the background and only refreshes share details on manual request.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

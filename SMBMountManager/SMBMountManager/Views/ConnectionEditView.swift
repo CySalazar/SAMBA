@@ -114,6 +114,10 @@ struct ConnectionEditView: View {
                         detailRow(title: "Encryption", value: runtimeDetails.encryptionState ?? "Unknown")
                         detailRow(title: "Multichannel", value: runtimeDetails.multichannelState ?? "Unknown")
 
+                        Text("Live session details are refreshed only on manual inspection to avoid repeated macOS prompts for mounted network volumes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
                         ForEach(runtimeDetails.sessionAttributes.keys.sorted(), id: \.self) { key in
                             if let value = runtimeDetails.sessionAttributes[key], value.isEmpty == false {
                                 detailRow(title: prettifiedAttributeName(key), value: value)

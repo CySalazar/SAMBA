@@ -30,6 +30,11 @@ final class MountService: ObservableObject {
             UserDefaults.standard.set(benchmarkPayloadSizeMB, forKey: Self.benchmarkPayloadSizeDefaultsKey)
         }
     }
+    @Published var backgroundDiagnosticsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(backgroundDiagnosticsEnabled, forKey: Self.backgroundDiagnosticsEnabledDefaultsKey)
+        }
+    }
 
     private var statusTimer: Timer?
     private var autoConnectTimer: Timer?
@@ -45,6 +50,7 @@ final class MountService: ObservableObject {
     private static let sessionRefreshIntervalDefaultsKey = "sessionRefreshIntervalSeconds"
     private static let stabilityObservationWindowDefaultsKey = "stabilityObservationWindow"
     private static let benchmarkPayloadSizeDefaultsKey = "benchmarkPayloadSizeMB"
+    private static let backgroundDiagnosticsEnabledDefaultsKey = "backgroundDiagnosticsEnabled"
 
     init() {
         let storedRetryCount = UserDefaults.standard.integer(forKey: Self.maximumAutomaticRetryCountDefaultsKey)
@@ -57,6 +63,7 @@ final class MountService: ObservableObject {
         stabilityObservationWindow = StabilityObservationWindow(rawValue: storedWindow ?? "") ?? .session
         let storedBenchmarkSize = UserDefaults.standard.integer(forKey: Self.benchmarkPayloadSizeDefaultsKey)
         benchmarkPayloadSizeMB = storedBenchmarkSize > 0 ? storedBenchmarkSize : 4
+        backgroundDiagnosticsEnabled = UserDefaults.standard.bool(forKey: Self.backgroundDiagnosticsEnabledDefaultsKey)
         runtimeDetails = PersistenceService.loadRuntimeDetails()
     }
 
@@ -312,8 +319,10 @@ final class MountService: ObservableObject {
                 updateTelemetry(for: connection.id) { telemetry in
                     telemetry.automaticRetryCount = 0
                 }
-                refreshSessionDetailsIfNeeded(for: connection)
-                runPassiveProbeIfNeeded(for: connection)
+                if backgroundDiagnosticsEnabled {
+                    refreshSessionDetailsIfNeeded(for: connection)
+                    runPassiveProbeIfNeeded(for: connection)
+                }
                 continue
             }
 
@@ -358,8 +367,10 @@ final class MountService: ObservableObject {
                 setStatus(.connected, for: connection.id)
                 LoggingService.shared.record(.debug, category: .mount, message: "Detected mounted SMB volume for \(connection.serverAddress)/\(connection.shareName) during wait loop | attempt=\(attempt)")
                 finishMountAttempt(for: connection.id)
-                refreshSessionDetailsIfNeeded(for: connection, force: true)
-                runPassiveProbeIfNeeded(for: connection, force: true)
+                if backgroundDiagnosticsEnabled {
+                    refreshSessionDetailsIfNeeded(for: connection, force: true)
+                    runPassiveProbeIfNeeded(for: connection, force: true)
+                }
                 return
             }
 
@@ -375,8 +386,10 @@ final class MountService: ObservableObject {
                     }
                     LoggingService.shared.record(.info, category: .mount, message: "Mount command completed successfully for \(connection.serverAddress)/\(connection.shareName) | exitCode=0")
                     finishMountAttempt(for: connection.id)
-                    refreshSessionDetailsIfNeeded(for: connection, force: true)
-                    runPassiveProbeIfNeeded(for: connection, force: true)
+                    if backgroundDiagnosticsEnabled {
+                        refreshSessionDetailsIfNeeded(for: connection, force: true)
+                        runPassiveProbeIfNeeded(for: connection, force: true)
+                    }
                     schedulePostMountVerification(for: connection)
                     return
                 }
@@ -409,8 +422,10 @@ final class MountService: ObservableObject {
             if self.isMounted(connection) {
                 self.setStatus(.connected, for: connection.id)
                 LoggingService.shared.record(.info, category: .mount, message: "Post-mount verification confirmed \(connection.serverAddress)/\(connection.shareName)")
-                self.refreshSessionDetailsIfNeeded(for: connection, force: true)
-                self.runPassiveProbeIfNeeded(for: connection, force: true)
+                if self.backgroundDiagnosticsEnabled {
+                    self.refreshSessionDetailsIfNeeded(for: connection, force: true)
+                    self.runPassiveProbeIfNeeded(for: connection, force: true)
+                }
             } else {
                 self.setStatus(.disconnected, for: connection.id)
                 LoggingService.shared.record(.warning, category: .mount, message: "Post-mount verification could not confirm \(connection.serverAddress)/\(connection.shareName) | expectedMountPoint=\(connection.mountPoint)")
