@@ -23,9 +23,13 @@ A native macOS application for managing SMB network share connections. Easily mo
 - **Performance Benchmarking** — On-demand read/write throughput measurement with configurable payload size (1–64 MB)
 - **Runtime Details Badges** — Inline badges on each connection row showing protocol version, "Unstable" (low stability), "High Latency" (≥1 s), and "Hidden" (for `$` shares)
 - **Context Menu Actions** — Right-click a connection for Copy SMB URL, Open Mount Point, Refresh Details, or Run Benchmark
-- **Diagnostics Console** — Two-tab layout (Logs and Health). The Logs tab provides a log viewer with four visibility modes (Hidden, Errors Only, Standard, All). The Health tab displays connection health snapshots with per-connection runtime breakdown. Logs can be copied to clipboard or cleared; health data can be exported as JSON
+- **Connection Import/Export** — Export all connections to a JSON file (without passwords) for backup or sharing. Import connections from a JSON file with automatic duplicate detection and merging
+- **Multi-Format Log Export** — Export diagnostic logs in four formats: Plain Text, JSON, CSV, or Markdown via a file save dialog
+- **Diagnostics Console** — Two-tab layout (Logs and Health). The Logs tab provides a log viewer with four visibility modes (Hidden, Errors Only, Standard, All). The Health tab displays connection health snapshots with per-connection runtime breakdown. Logs can be exported in multiple formats or cleared; health data can be exported as JSON
 - **Configurable Monitoring** — Settings panel in the Diagnostics Console for probe interval (10–120 s), session refresh interval (30–300 s), automatic retry limit (1–20), stability observation window (Session / 24 Hours / 7 Days), and benchmark payload size (1–64 MB)
 - **Launch/Quit Behaviors** — Optional toggles to auto-connect shares on app launch and auto-disconnect on quit
+- **Settings Window** — macOS native Settings scene with toggles for menu bar extra visibility and launch at login (via `SMAppService`)
+- **Sensitive Data Redaction** — Passwords and credentials are automatically redacted in log output, replacing sensitive values with `<redacted>`
 
 ## Screenshots
 
@@ -95,7 +99,7 @@ The connection form allows you to configure all the details for an SMB share: a 
 2. Use the **Logs / Health** tab picker to switch between log viewing and health monitoring.
 3. **Logs tab:**
    - Use the segmented control to switch between visibility modes: Hidden, Errors Only, Standard, All.
-   - Click **Copy Logs** to copy all entries to the clipboard in ISO 8601 format.
+   - Click **Export Logs** to save all entries as a file in one of four formats: Plain Text, JSON, CSV, or Markdown.
    - Click **Clear** to remove all recorded entries.
 4. **Health tab:**
    - View connection health snapshots on the left (status, stability, confidence).
@@ -104,6 +108,11 @@ The connection form allows you to configure all the details for an SMB share: a 
 5. **Settings panel:**
    - Adjust the automatic retry limit, probe interval, session refresh interval, stability observation window, and benchmark payload size.
    - Toggle "Connect auto-connect shares when the app launches" and "Disconnect connected shares when the app quits."
+
+### Importing and Exporting Connections
+
+- Click the **Import** button in the toolbar to load connections from a JSON file. Duplicate connections (same server, share, and username) are automatically skipped.
+- Click the **Export** button in the toolbar to save all connections to a JSON file. Passwords are never included in the export — only connection metadata (name, server, share, username, auto-connect flag).
 
 ### Connecting and Disconnecting
 
@@ -144,7 +153,7 @@ When enabled for a connection, the app automatically attempts to mount the share
 | Passwords | macOS Keychain (service: `com.smb-mount-manager`) | Encrypted |
 | User preferences | `UserDefaults` | Various |
 
-**UserDefaults keys:** `logVisibilityMode`, `maximumAutomaticRetryCount`, `probeIntervalSeconds`, `sessionRefreshIntervalSeconds`, `stabilityObservationWindow`, `benchmarkPayloadSizeMB`, `connectSharesOnLaunch`, `disconnectSharesOnQuit`.
+**UserDefaults keys:** `logVisibilityMode`, `maximumAutomaticRetryCount`, `probeIntervalSeconds`, `sessionRefreshIntervalSeconds`, `stabilityObservationWindow`, `benchmarkPayloadSizeMB`, `connectSharesOnLaunch`, `disconnectSharesOnQuit`, `showMenuBarExtra`.
 
 - Passwords are **never** written to the JSON file — only the connection metadata (name, server, share, username, auto-connect flag) is persisted.
 - Runtime details (telemetry, probe history, error counts, benchmark results) are persisted separately and survive app restarts.
@@ -156,7 +165,7 @@ When enabled for a connection, the app automatically attempts to mount the share
 SAMBA/
 ├── SMBMountManager/
 │   ├── SMBMountManager/
-│   │   ├── SMBMountManagerApp.swift        # App entry point (@main)
+│   │   ├── SMBMountManagerApp.swift        # App entry point, AppState, SettingsView
 │   │   ├── Models/
 │   │   │   ├── SMBConnection.swift         # Data model + ConnectionStatus enum
 │   │   │   └── SMBShareDetails.swift       # Health monitoring, telemetry, and benchmark types
@@ -165,17 +174,19 @@ SAMBA/
 │   │   │   ├── ConnectionRow.swift         # Individual connection row with badges and context menu
 │   │   │   ├── ConnectionEditView.swift    # Add/edit connection form + share discovery
 │   │   │   ├── DiscoveryView.swift         # Bonjour SMB server discovery panel
-│   │   │   └── DiagnosticsConsoleView.swift # Diagnostics console (logs + health monitoring)
+│   │   │   └── DiagnosticsConsoleView.swift # Diagnostics console (logs + health + log export)
 │   │   ├── Services/
-│   │   │   ├── MountService.swift          # Mount, unmount, status monitoring, telemetry, benchmarking
+│   │   │   ├── MountService.swift          # Mount, unmount, telemetry, benchmarking + utilities
 │   │   │   ├── KeychainService.swift       # Secure password CRUD via Keychain
-│   │   │   ├── PersistenceService.swift    # JSON file persistence (connections + runtime details)
-│   │   │   ├── LoggingService.swift        # Centralized logging with severity/category
+│   │   │   ├── PersistenceService.swift    # JSON file persistence + PersistenceCodec
+│   │   │   ├── LoggingService.swift        # Centralized logging + multi-format export
 │   │   │   ├── SMBDiscoveryService.swift   # Bonjour network browser with IP resolution
-│   │   │   └── SMBShareDiscoveryService.swift # Share enumeration via smbutil
+│   │   │   └── SMBShareDiscoveryService.swift # Share enumeration + SMBShareOutputParser
 │   │   ├── Assets.xcassets/                # App icon assets
 │   │   ├── Info.plist                      # Bonjour service declarations
 │   │   └── SMBMountManager.entitlements    # Network client entitlement
+│   ├── SMBMountManagerTests/
+│   │   └── MountDiagnosticsTests.swift     # Unit tests for core utilities
 │   ├── SMBMountManager.xcodeproj/          # Xcode project configuration
 │   └── generate_icon.py                    # App icon generation script
 ├── ARCHITECTURE.md                         # Technical architecture reference

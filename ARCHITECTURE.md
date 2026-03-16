@@ -7,32 +7,76 @@ This document describes the technical architecture of SMB Mount Manager for deve
 The application follows **MVVM (Model-View-ViewModel)**:
 
 - **Model** — `SMBConnection`, `ConnectionStatus`, and the `SMBShareDetails` types (stability grades, runtime details, health snapshots, benchmark results, timeline events, error categories)
-- **ViewModel** — `MountService`, `SMBDiscoveryService`, `LoggingService` (shared `ObservableObject` instances managing state and business logic)
-- **View** — SwiftUI views (`ContentView`, `ConnectionRow`, `ConnectionEditView`, `DiscoveryView`, `DiagnosticsConsoleView`)
+- **ViewModel** — `AppState`, `MountService`, `SMBDiscoveryService`, `LoggingService` (shared `ObservableObject` instances managing state and business logic)
+- **View** — SwiftUI views (`ContentView`, `ConnectionRow`, `ConnectionEditView`, `DiscoveryView`, `DiagnosticsConsoleView`, `SettingsView`)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │  Views (SwiftUI)                                                                │
-│  ContentView · ConnectionRow · ConnectionEditView                               │
+│  ContentView · ConnectionRow · ConnectionEditView · SettingsView                │
 │  DiscoveryView · DiagnosticsConsoleView · ConnectionDetailsSheet                │
 └──────────┬──────────────────┬──────────────────┬────────────────────────────────┘
-           │ @StateObject     │ @StateObject     │ @StateObject
+           │ @StateObject     │ via AppState     │ @StateObject
 ┌──────────▼────────┐ ┌──────▼───────────┐ ┌────▼─────────────────────┐
-│  MountService     │ │SMBDiscoveryServ. │ │ LoggingService (shared)  │
-│  (mount/unmount)  │ │(Bonjour browser) │ │ (centralized logging)    │
-│  (telemetry)      │ │(IP resolution)   │ │                          │
-│  (benchmarking)   │ │                  │ │                          │
-│  (health monitor) │ │                  │ │                          │
-└────┬────┬────┬────┘ └──────────────────┘ └──────────────────────────┘
+│  AppState         │ │SMBDiscoveryServ. │ │ LoggingService (shared)  │
+│  (connections)    │ │(Bonjour browser) │ │ (centralized logging)    │
+│  (import/export)  │ │(IP resolution)   │ │ (multi-format export)    │
+│  (launch login)   │ │                  │ │                          │
+└────────┬──────────┘ └──────────────────┘ └──────────────────────────┘
+         │ owns
+┌────────▼──────────┐
+│  MountService     │
+│  (mount/unmount)  │
+│  (telemetry)      │
+│  (benchmarking)   │
+│  (health monitor) │
+└────┬────┬────┬────┘
      │    │    │
 ┌────▼──┐ ┌▼───────────┐ ┌▼────────────────┐
 │Keychn.│ │Persistence │ │ System APIs     │
 │Service│ │Service     │ │ /sbin/mount     │
-│       │ │(JSON files)│ │ umount/diskutil │
-│       │ │connections │ │ statfs/smbutil  │
+│       │ │+ Codec     │ │ umount/diskutil │
+│       │ │(JSON files)│ │ statfs/smbutil  │
+│       │ │connections │ │                 │
 │       │ │runtime-det.│ │                 │
 └───────┘ └────────────┘ └─────────────────┘
 ```
+
+## AppState
+
+**File:** `SMBMountManager/SMBMountManagerApp.swift`
+
+The central application state manager. An `@MainActor` `ObservableObject` that owns the connection lifecycle, service instances, and app-level behaviors.
+
+**Published state:**
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `connections` | `[SMBConnection]` | `[]` | All configured SMB connections |
+| `showMenuBarExtra` | `Bool` | `false` | Controls menu bar extra visibility (persisted to UserDefaults) |
+| `launchAtLoginEnabled` | `Bool` | `false` | Whether the app is registered to launch at login |
+| `launchAtLoginRequiresApproval` | `Bool` | `false` | Whether the user needs to approve launch at login in System Settings |
+| `launchAtLoginStatusMessage` | `String?` | `nil` | Status feedback for launch-at-login operations |
+
+**Owned services:**
+
+- `mountService: MountService` — mount/unmount, telemetry, benchmarking
+- `loggingService: LoggingService` — shared logging singleton
+- `discoveryService: SMBDiscoveryService` — Bonjour browser
+
+**Key methods:**
+
+| Method | Description |
+|--------|-------------|
+| `addConnection(_:password:)` | Saves a new connection to persistence and Keychain |
+| `updateConnection(_:password:)` | Updates an existing connection |
+| `deleteConnections(at:)` | Deletes connections with Keychain cleanup |
+| `connectAll()` / `disconnectAll()` | Bulk mount/unmount operations |
+| `exportConnections(to:)` | Exports connections as JSON via `PersistenceCodec` (passwords excluded) |
+| `importConnections(from:)` | Imports connections from JSON with duplicate detection (same server+share+username) |
+| `toggleLaunchAtLogin()` | Registers/unregisters via `SMAppService.mainApp` |
+| `applyLaunchBehaviorIfNeeded(connectSharesOnLaunch:)` | Auto-connects shares on app launch if enabled |
+| `handleApplicationWillTerminate(disconnectSharesOnQuit:)` | Auto-disconnects shares on app quit if enabled |
 
 ## Models
 
@@ -224,13 +268,13 @@ The central service managing all mount operations, status monitoring, telemetry,
 
 All configurable properties are persisted to `UserDefaults` and restored on init.
 
-**Private state:**
+**Private state (managed by extracted utility types):**
 
-| Property | Purpose |
-|----------|---------|
-| `pendingMountRequests` | Queue of mount operations waiting to execute |
-| `activeMountRequest` | The currently executing mount operation (at most one) |
-| `automaticRetryCounts` | Per-connection count of consecutive automatic retries |
+| Component | Purpose |
+|-----------|---------|
+| `MountRequestQueue` | Serializes mount operations — one active at a time, others queued in order |
+| `AutomaticRetryTracker` | Per-connection retry counting with manual/automatic distinction and limit enforcement |
+| `BackgroundRefreshPolicy` | Enforces probe and session refresh intervals, respects connection status |
 | `consecutiveMissedChecks` | Per-connection count of refresh cycles where `isMounted` returned false |
 | `telemetry` | Per-connection internal tracking state (timestamps, duration counters) |
 
@@ -272,6 +316,55 @@ All configurable properties are persisted to `UserDefaults` and restored on init
 | `runBenchmark(for:)` | Writes a random-data temp file of `benchmarkPayloadSizeMB` to the mounted volume, reads it back, and records the `SMBBenchmarkResult`. |
 | `healthSnapshots(for:)` | Produces `[ConnectionHealthSnapshot]` summaries for the diagnostics health view. |
 | `exportHealthJSON(for:)` | Serializes health snapshots as a JSON string for clipboard export. |
+
+### MountService Utility Types
+
+**File:** `SMBMountManager/Services/MountService.swift`
+
+These types are defined alongside `MountService` and encapsulate discrete responsibilities:
+
+#### MountDiagnostics
+
+An enum providing error message mapping and sensitive data redaction.
+
+| Method | Description |
+|--------|-------------|
+| `userFacingMountError(_:)` | Maps raw mount/unmount errors to user-friendly messages |
+| `redactSensitiveValue(_:)` | Regex-based password redaction, replacing credentials with `<redacted>` |
+
+#### MountErrorClassifier
+
+An enum that categorizes raw error strings into `ConnectionErrorCategory` values (`.authentication`, `.connectivity`, `.timeout`, `.shareNotFound`, `.mountPointBusy`, `.unknown`).
+
+#### AutomaticRetryTracker
+
+A struct tracking per-connection retry counts with support for manual vs. automatic retry distinction.
+
+| Method | Description |
+|--------|-------------|
+| `registerFailure(for:isManual:)` | Resets counter to 1 for manual retries; increments for automatic |
+| `canAutomaticallyRetry(for:maximum:)` | Returns `true` if current count is below the configured limit |
+| `prune(keeping:)` | Removes tracking data for deleted connections |
+
+#### MountRequestQueue
+
+A struct managing pending and active mount requests with upgrade semantics.
+
+| Method | Description |
+|--------|-------------|
+| `enqueue(_:)` | Adds a request; upgrades automatic→user-initiated if already queued |
+| `dequeueNext()` | Returns the next pending request and marks it active |
+| `finish(_:)` | Clears the active request |
+| `prune(keeping:)` | Removes requests for deleted connections |
+
+#### BackgroundRefreshPolicy
+
+An enum enforcing interval-based guards for background operations.
+
+| Method | Description |
+|--------|-------------|
+| `shouldRunProbe(for:interval:lastProbe:force:)` | Checks status and interval before allowing a probe |
+| `shouldRefreshSessionDetails(for:interval:lastRefresh:)` | Independent interval guard for session detail collection |
 
 ### KeychainService
 
@@ -316,6 +409,17 @@ The directory is created automatically with `withIntermediateDirectories: true` 
 
 **PersistedConnectionState** — a nested `Codable` struct bundling `connections` and `runtimeDetails` for potential combined serialization.
 
+#### PersistenceCodec
+
+An enum defined in `PersistenceService.swift` providing standalone JSON encoding/decoding for connections and runtime details, used by `AppState` for import/export operations.
+
+| Method | Description |
+|--------|-------------|
+| `encodeConnections(_:)` | Encodes `[SMBConnection]` to JSON `Data` |
+| `decodeConnections(from:)` | Decodes `[SMBConnection]` from JSON `Data` |
+| `encodeRuntimeDetails(_:)` | Encodes runtime details with ISO 8601 dates |
+| `decodeRuntimeDetails(from:)` | Decodes runtime details with ISO 8601 date handling |
+
 ### LoggingService
 
 **File:** `SMBMountManager/Services/LoggingService.swift`
@@ -344,6 +448,23 @@ A singleton `ObservableObject` providing centralized, structured logging across 
 | `record(_:category:message:)` | Appends an entry and writes to `OSLog` |
 | `clear()` | Removes all in-memory entries |
 | `exportText()` | Returns all entries as ISO 8601-formatted text |
+
+#### LogExportFormatter
+
+A static struct providing multi-format log export.
+
+| Method | Description |
+|--------|-------------|
+| `export(_:format:)` | Exports `[LogEntry]` in the specified `LogExportFormat` |
+
+**LogExportFormat** — an enum defining the available export formats:
+
+| Case | Extension | Description |
+|------|-----------|-------------|
+| `.plainText` | `.txt` | ISO 8601 timestamps with `[SEVERITY] [CATEGORY]` format |
+| `.json` | `.json` | Pretty-printed JSON array with sorted keys |
+| `.csv` | `.csv` | Header row with properly escaped fields |
+| `.markdown` | `.md` | Pipe-delimited table format |
 
 ### SMBDiscoveryService
 
@@ -388,7 +509,15 @@ A static struct that enumerates available shares on a given SMB server using the
 |--------|-------------|
 | `discoverShares(serverAddress:username:password:)` | Runs `smbutil view //user:pass@server` and parses the output |
 
-Credentials are percent-encoded before being passed to `smbutil`. The output is parsed line-by-line, filtering out header rows and extracting share names. Results are deduplicated and sorted alphabetically.
+Credentials are percent-encoded before being passed to `smbutil`. Output parsing is delegated to `SMBShareOutputParser`.
+
+#### SMBShareOutputParser
+
+An enum defined in `SMBShareDiscoveryService.swift` that parses the tabular output of `smbutil view`.
+
+| Method | Description |
+|--------|-------------|
+| `parseShares(from:serverAddress:)` | Regex-based column splitting, deduplication by server+name, alphabetical sorting. Handles hidden shares (ending with `$`) and preserves server-provided comments. |
 
 ## Views
 
@@ -396,16 +525,13 @@ Credentials are percent-encoded before being passed to `smbutil`. The output is 
 
 **File:** `SMBMountManager/Views/ContentView.swift`
 
-The root view of the application. Owns the `MountService`, `LoggingService`, and `SMBDiscoveryService` instances and the connections array.
+The root view of the application. Receives services from `AppState` via the environment.
 
 **State management:**
 
-- `@StateObject mountService` — mount/unmount, telemetry, and benchmarking
-- `@StateObject loggingService` — shared logging singleton
-- `@StateObject discoveryService` — Bonjour browser
+- `appState` — central state (connections, services, import/export) received from environment
 - `@AppStorage connectSharesOnLaunch` — auto-connect on launch toggle
 - `@AppStorage disconnectSharesOnQuit` — auto-disconnect on quit toggle
-- `@State connections` — the array of saved connections
 - `@State editingConnection` — triggers the edit sheet
 - `@State selectedConnection` — triggers the connection details sheet
 - `@State isAddingNew` — triggers the add sheet
@@ -440,8 +566,10 @@ An inline private struct (`ConnectionDetailsSheet`) opened when tapping a connec
 
 **Key behaviors:**
 
-- Toolbar buttons: Connect All, Disconnect All, Discover SMB Servers, Diagnostics Console, Add Connection.
+- Toolbar buttons: Connect All, Disconnect All, Discover SMB Servers, Diagnostics Console, Import Connections, Export Connections, Add Connection.
 - Filter bar with search field, status picker, and sort picker.
+- Import: `NSOpenPanel` with `.json` filter → `appState.importConnections()` → merge with duplicate detection, reports imported/skipped counts.
+- Export: `NSSavePanel` with default filename `SMBMountManager-connections.json` → `appState.exportConnections()` → JSON without passwords.
 - Sheet modals for add/edit, discovery, diagnostics, and connection details.
 - Selecting a host from the discovery panel opens the add-connection form pre-filled with the host address.
 - Swipe-to-delete with Keychain cleanup.
@@ -537,12 +665,27 @@ A modal diagnostics panel with two tabs and a settings panel.
 
 **Actions:**
 
-- **Copy Logs** — copies all log entries to the clipboard (Logs tab).
+- **Export Logs** — saves log entries to a file via `NSSavePanel` with format selection (Plain Text, JSON, CSV, Markdown). Uses `LogExportFormatter` for format conversion (Logs tab).
 - **Copy Health JSON** — exports health snapshots as JSON (Health tab).
 - **Clear** — removes all recorded log entries (Logs tab only).
 - Esc to close.
 
 **Minimum size:** 900×560.
+
+### SettingsView
+
+**File:** `SMBMountManager/SMBMountManagerApp.swift` (private struct)
+
+A macOS native Settings scene accessible via the app menu (⌘,).
+
+**Controls:**
+
+| Control | Description |
+|---------|-------------|
+| Show Menu Bar Extra | Toggle controlling `appState.showMenuBarExtra` |
+| Launch at Login | Toggle calling `appState.toggleLaunchAtLogin()` via `SMAppService.mainApp` |
+
+Displays status messages when launch-at-login requires user approval, with a button to open System Settings > Login Items.
 
 ## Data Flow
 
@@ -550,15 +693,15 @@ A modal diagnostics panel with two tabs and a settings panel.
 User action (tap Connect, add connection, etc.)
     │
     ▼
-ContentView calls MountService method or updates connections array
+ContentView calls AppState method (addConnection, connectAll, etc.)
     │
     ▼
-MountService updates statuses dictionary (@Published)
+AppState delegates to MountService → updates statuses (@Published)
     │
     ├──▶ SwiftUI observes change, re-renders affected views
     │
     ▼
-ContentView calls saveAndRefresh() → PersistenceService.save() + MountService.updateConnections()
+AppState persists via PersistenceService.save() + MountService.updateConnections()
 ```
 
 **Telemetry data flow:**
@@ -647,3 +790,26 @@ The App Sandbox is **disabled** — this is necessary because mounting SMB share
 13. **Passive probing** — probe latency is measured by listing the mounted volume's directory contents rather than sending network-level pings. This measures the actual I/O path the user experiences, including filesystem and protocol overhead.
 
 14. **Session detail collection** — protocol version, signing state, encryption state, and multichannel state are collected via `smbutil statshares -j` and `smbutil multichannel -j` in JSON output mode. This avoids private APIs and leverages built-in macOS tools.
+
+15. **Connection import/export** — exports use `PersistenceCodec` to serialize only connection metadata (no passwords). Imports detect duplicates by matching on server address, share name, and username, merging new connections and skipping existing ones.
+
+16. **Sensitive data redaction** — `MountDiagnostics.redactSensitiveValue()` uses regex to replace passwords in SMB URLs and mount commands before they reach the logging subsystem, ensuring credentials never appear in logs or exports.
+
+17. **Launch at login** — managed via `SMAppService.mainApp.register()` / `.unregister()`. The API may return `.requiresApproval` status on first registration, directing the user to System Settings > Login Items.
+
+## Tests
+
+**File:** `SMBMountManagerTests/MountDiagnosticsTests.swift`
+
+Unit tests covering the extracted utility types:
+
+| Test Suite | Coverage |
+|------------|----------|
+| `MountDiagnosticsTests` | Password redaction, error message mapping |
+| `SMBShareOutputParserTests` | Output parsing, deduplication, comment preservation |
+| `MountErrorClassifierTests` | All 6 error categories |
+| `PersistenceCodecTests` | Round-trip JSON encoding/decoding with ISO 8601 dates |
+| `MountRequestQueueTests` | Upgrade logic, queue promotion, pruning |
+| `AutomaticRetryTrackerTests` | Manual/automatic retry distinction, limit enforcement |
+| `BackgroundRefreshPolicyTests` | Interval guards, force bypass, status checking |
+| `LogExportFormatterTests` | All 4 export formats (Plain Text, JSON, CSV, Markdown) |
